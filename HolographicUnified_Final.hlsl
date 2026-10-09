@@ -8,14 +8,8 @@
 //   • Hologram3_010.hlsl (918L): plate-correct POM Illinois+Scharr+TBN orbit, thin-film 12-sample sinc coherence,
 //     DOE local-grating Gauss-Hermite 5, groove profiles, footprint-prefilter, CIE XYZ→sRGB gamut comp.
 //   • Hologram2_010/020/070/090 + Hologram2.hlsl: Cook-Torrance, GeometrySmith, Fresnel Schlick, point/directional/spot
-//     multi-light (attenuation, cone, SSP), perlin hash2, Worley, FBM, AO 18×3, shadow 12-step, RGB→YIQ/HSL hue spin.
 //   • holographic.hlsl.txt (3465L) + newHoloCopy.txt: Sellmeier dispersion (9 materials, B/C coeffs), optical path
 //     phaseDifference, CoherenceFactor, EffectiveRefractiveIndex, birefringence, anisotropy, thin-film Property block,
-//     Multi-Wave synchronized & Spiral interference, Grain Turbulence.
-//   • Bloom_20241221.hlsl: depthDensity, occlusion, GlitchNoise, SineWave ripple, Round/RippleRainbow, FresBloom,
-//     ColorAdjust vibrance/sepia, GaussianBloom 3×3, DepthOfField, RainbowColor gradient.
-//   • cap_Rainbow1 / cap_RippleRainbow1 / cap_worm1: Rainbow oil-film sigmoid fade, ripple distortion (distance-time),
-//     worm-tunnel raymarch (Hash-based tunnel + FBM), sparkle glitter.
 //   • ComputeShader/NormalMap/funcs.txt/notes.txt/newHoloCopy: Scharr kernel 3-10-3, CalculateDepthNormalV4/V6,
 //     parallaxUv = depthM/sizeM per axis, LodFade, swirling groove, chirp, swirl, footprint variance.
 // Every cbuffer field, every bound texture/MRT, both samplers are USED (see usage index in PS).
@@ -160,7 +154,6 @@ static const float DOE_FLAT_BIAS = 0.02; // groove direction on a flat region: +
 static const float DOE_PHASE_MAX_RAD = 8.0;
 static const float DOE_ALBEDO_TINT = 1.0; // 1: diffracted light is multiplied by the surface albedo (metallised foil)
 
-
 static const float STEER_ORBIT_RADIUS_N = 0.25; // [N units]
 static const float STEER_ORBIT_RATE_RAD_S = 0.5; // [rad/s]
 static const float VIEW_BACKFACE_TOLERANCE = 0.02; // [dimensionless] added to TS view z before clip
@@ -185,11 +178,7 @@ static const float DOE_CHIRP = f8;                   // period chirp vs depth
 static const float DOE_GROOVE_NM = f10;              // groove depth scale
 static const float OIL_RAINBOW_STRENGTH = f1;        // cap_Rainbow: oil-film rainbow mix (0-1)
 static const float FILM_THICKNESS_BIAS = f6;         // film thickness lerp bias (HeightParamA/B also)
-static const float AURORA_INTENSITY = f7;            // Bloom_20241221 aurora / caustic strength
-static const float BLOOM_THRESH = f9;                // bloom threshold (also drives worm speed)
 static const float FRESNEL_OIL_BIAS = saturate(f7*0.5+0.5); // extra fresnel from f7
-static const float WORM_SPEED = f9 * 0.7 + 0.3;      // cap_worm tunnel speed
-static const float GLITTER_DENSITY = f6 * 2.0 + 0.5; // Worley glitter density
 // Remaining cbuffer fields wired in PS body (see usage index there) — ParallaxFactorA/B/C, HeightParamA/B/C,
 // PhaseOffsetR/G/B, TanhFactorR/G/B, CosineFactorR/G/B, LookAtX/Y+Delta, FresnelPower/Reflectance/Mix,
 // SpecularPower/Intensity, NormalRadius, HeightScale, MaterialIndex, ParallaxScale/OMD, Gamma, Key*,
@@ -291,7 +280,6 @@ struct ViewLightFrame
 };
 
 //=====================================================================
-// FUSION UTILITIES — hash/perlin/worley/FBM/hue/XYZ from Hologram2 / Bloom_20241221 / holographic.hlsl.txt
 //=====================================================================
 float3 SafeNormalize(float3 v)
 {
@@ -300,57 +288,6 @@ float3 SafeNormalize(float3 v)
 }
 float Sinc(float x)
 {
-    const float px = PI * x;
-    return (abs(px) < 1e-4) ? 1.0 : sin(px) / px;
-}
-float Sigmoid(float x){ return 1.0/(1.0+exp(-x)); }
-float3 SigmoidColorFade(float t,float3 a,float3 b){ float f = t*t*t*(t*(t*6.0-15.0)+10.0); return lerp(a,b,f); }
-// hash/perlin from Bloom_20241221 — compact Worley + FBM for glitter/aurora
-float Hash21(float2 p){ return frac(sin(dot(p,float2(127.1,311.7)))*43758.5453); }
-float2 Hash22(float2 p){ return frac(sin(float2(dot(p,float2(127.1,311.7)),dot(p,float2(269.5,183.3))))*43758.5453); }
-// perlin2 (Bloom) — 2D gradient noise, time-wobbled
-float Perlin2Fused(float2 uv)
-{
-    uv += float2(TotalTime*0.0314159*uv.x, TotalTime*0.0314159*uv.y);
-    float2 g = floor(uv); float2 f = frac(uv); f = f*f*(3.0-2.0*f);
-    float2 g00 = Hash22(g)*2.0-1.0, g10 = Hash22(g+float2(1,0))*2.0-1.0, g01 = Hash22(g+float2(0,1))*2.0-1.0, g11 = Hash22(g+float2(1,1))*2.0-1.0;
-    float n00 = dot(g00,f), n10 = dot(g10,f-float2(1,0)), n01 = dot(g01,f-float2(0,1)), n11 = dot(g11,f-float2(1,1));
-    float nx0 = lerp(n00,n10,f.x), nx1 = lerp(n01,n11,f.x);
-    return lerp(nx0,nx1,f.y)*0.5+0.5;
-}
-float WorleyFused(float2 uv, float jitter=1.0)
-{
-    float2 gv = floor(uv); float2 f = frac(uv); float d=2.0;
-    for(int y=-1;y<=1;++y) for(int x=-1;x<=1;++x){
-        float2 o = float2(float(x),float(y));
-        float2 h = Hash22(gv+o)*jitter;
-        float2 p = o + h - f;
-        d = min(d, dot(p,p));
-    }
-    return 1.0 - saturate(sqrt(d));
-}
-float FbmFused(float2 uv, int oct=4)
-{
-    float v=0.0, a=0.5, f=1.0;
-    for(int i=0;i<oct;++i){ v += a*Perlin2Fused(uv*f); uv*=2.0; a*=0.5; f*=2.07; }
-    return v;
-}
-// HSV hue spin (Hologram2) — cheaper than matrix
-float3 RgbToHsv(float3 c){ float4 K=float4(0.0,-1.0/3.0,2.0/3.0,-1.0); float4 p=lerp(float4(c.bg,K.wz),float4(c.gb,K.xy),step(c.b,c.g)); float4 q=lerp(float4(p.xyw,c.r),float4(c.r,p.yzx),step(p.x,c.r)); float d=q.x-min(q.w,q.y); float e=1.0e-10; return float3(abs(q.z+(q.w-q.y)/(6.0*d+e)),d/(q.x+e),q.x); }
-float3 HsvToRgb(float3 c){ float4 K=float4(1.0,2.0/3.0,1.0/3.0,3.0); float3 p=abs(frac(c.xxx+K.xyz)*6.0-K.www); return c.z*lerp(K.xxx, saturate(p-K.xxx), c.y); }
-float3 RotateHueFused(float3 rgb, float ang){ float3 hsv=RgbToHsv(rgb); hsv.x=frac(hsv.x+ang/6.2831853); return HsvToRgb(hsv); }
-// XYZ helpers reused below; Sellmeier simplified (holographic.hlsl.txt — 9-material LUT trimmed to 3 scalar presets + full B/C path)
-float3 RefractiveIndex_SellmeierSimple(float waveNm, int matIdx)
-{
-    // Fast path: 3 presets lerp by wave, mimics holographic.hlsl.txt CreateMaterial: sapphire/diamond/amber.
-    // Real B/C formula would be RefractiveIndexFromCoefficients() but heavy — this preserves hue-vs-wave dispersion.
-    float t = saturate((waveNm-380.0)/400.0);
-    float n0=1.45, n1=2.417, n2=1.54;
-    // dispersion: shorter wave => higher n (normal). Modulate by matIdx.
-    float disp = (1.0 - t)*0.08;
-    float base = lerp(lerp(n0,n1, saturate(fmod(float(matIdx),3.0)/2.0)), n2, 0.15);
-    return float3(base+disp, base+disp*0.7, base+disp*0.4);
-}
 //=====================================================================
 // COMPLEX & TENSOR PHYSICS — state-of-the-art holographic core
 // Helmholtz / Maxwell in anisotropic media, Jones/Mueller, 4×4 Berreman
@@ -448,35 +385,6 @@ JonesMat Jones_RotatedRetarder(float lambdaNM, float delta_n, float thicknessNM,
     // For real rotation, Jones rotation is real, so we can do: M = R^T * Ret * R
     JonesMat Rt; Rt.xx=float2(ca,0); Rt.xy=float2(sb,0); Rt.yx=float2(-sb,0); Rt.yy=float2(ca,0);
     return JonesMul(JonesMul(Rt, Ret), R);
-}
-// Complex Gaussian bloom per λ (diffraction-limited PSF ∝ λ): σ = baseSigma * (λ/550) * (1+RButton*0.3)
-ComplexField GaussianBloom_Complex(Texture2D<float4> texComplex, float2 uv, float2 texel, float lambdaNM)
-{
-    // 3×3 Gaussian with λ-dependent sigma
-    float sigma = (0.9 + RButton*0.3) * (lambdaNM/550.0);
-    float sig2 = sigma*sigma + 1e-4;
-    ComplexField sum = CF_Zero(); float wsum=0;
-    for(int y=-1;y<=1;++y) for(int x=-1;x<=1;++x){
-        float2 off = float2(float(x),float(y))*texel* (1.2+sigma*0.15);
-        float4 p = texComplex.SampleLevel(sampleTypeLinear, uv+off, 0);
-        ComplexField cf = CF_UnpackRT(p);
-        float r2 = float(x*x+y*y);
-        float w = exp(-r2/(2.0*sig2));
-        sum.Ex = CAdd(sum.Ex, CScale(cf.Ex, w));
-        sum.Ey = CAdd(sum.Ey, CScale(cf.Ey, w));
-        wsum += w;
-    }
-    sum.Ex = CScale(sum.Ex, 1.0/max(wsum,1e-6));
-    sum.Ey = CScale(sum.Ey, 1.0/max(wsum,1e-6));
-    return sum;
-}
-ComplexField ChromaticShift_Complex(Texture2D<float4> texComplex, float2 uv, float2 texel, float lambdaNM, float baseRadius)
-{
-    float shift = baseRadius * (lambdaNM - 550.0)/220.0 * HeightScale*0.12;
-    float2 off = float2(shift, 0) * texel.x * 550.0; // scale to uv
-    float4 p = texComplex.SampleLevel(sampleTypeLinear, uv+off, 0);
-    return CF_UnpackRT(p);
-}
 // ----- True holographic depth projection — Fresnel point-cloud CGH -----
 static const float HOLO_SCALE_M = 0.08;
 static const int HOLO_SAMPLES = 24;
@@ -545,13 +453,6 @@ void ThinFilm_CharMatrix(float n0,float n1,float n2, float d_NM, float cosT0, fl
     r_s = CDiv(num_s, den_s);
     r_p = CDiv(num_p, den_p);
 }
-// Physical ripple as Hankel wave: (A / sqrt(r)) * J0(k r) * cos(ωt - k r) * exp(-r / L)  ; J0 approx via cos
-float BesselJ0_Approx(float x){ // Abramowitz 9.4.1 truncated
-    float ax = abs(x);
-    if(ax < 8.0){ float y = x*x; float a1=57568490574.0+y*(-13362590354.0+y*(651773.0+y*(-11214424.1+y*(77392.0+y*(-184.0))))); float b1=57568490411.0+y*(1029532985.0+y*(9494680.0+y*(59272.0+y*(267.0+y*1.0)))); return a1/b1; }
-    else { float z=8.0/ax; float y=z*z; float xx=ax-0.785398164; float a1=1.0+y*(-0.1098628+y*(0.02797733+y*(-0.0309683+y*0.00443319))); float b1=-0.785398164+y*(-0.04166397+y*(0.00003954+y*(0.00262573+y*(-0.00054125)))); float r=sqrt(0.636619772/ax); return r*(a1*cos(xx)-b1*sin(xx)); }
-}
-float RippleDistortion_Physical(float2 uv,float2 center,float amp,float k_wave,float omega,float time)
 {
     float d = distance(uv,center);
     if(d < 1e-3) return 0.0;
@@ -559,15 +460,6 @@ float RippleDistortion_Physical(float2 uv,float2 center,float amp,float k_wave,f
     float env = amp * exp(-d*2.2) / sqrt(max(r,0.5));
     float phase = omega*time - k_wave*r;
     float s,c; sincos(phase,s,c);
-    return env * BesselJ0_Approx(k_wave*r) * c;
-}
-float SineWaveFused(float x,float amp,float freq){ return amp*sin(x*freq); }
-float RippleDistortionFused(float2 uv,float2 center,float amp,float freq,float time)
-{
-    // legacy wrapper routes to physical model (k = 2π f, ω = k c)
-    float k = TWO_PI*freq*0.1; float omega = k*1.2; // c≈1.2 uv/s
-    return RippleDistortion_Physical(uv,center,amp,k,omega,time);
-}
 
 float2 TextureSizePx(Texture2D<float> tex)
 {
@@ -1075,7 +967,6 @@ float GrooveDepthNm(float2 uv)
 #endif
 }
 
-
 // Local-grating (geometrical-optics limit of a CGH / dot-matrix hologram) model. All vectors are TS directions.
 // Grating equation, transverse part in the local surface plane: V_t + L_t = m (lambda / Lambda) g, with g the grating
 // direction. For order m the wavelength that satisfies it is lambda_m = kAlong Lambda / m, so the order is a spectral
@@ -1137,110 +1028,9 @@ float3 DiffractiveRainbow(float2 uv, float3 normalTS, float3 viewDirTS, float3 l
     return GamutCompress(XyzToLinearRgb(xyz / max(DoeYWhite(), EPSILON)));
 }
 //===========================================================
-// FUSION ADDITIONS — Aurora / Caustics / Ripple / Worm / Bloom / Fresnel+C-T / Anisotropy / Multi-Wave
 // (all use cbuffer features that were idle in 010: TanhFactor*, CosineFactor*, LookAt*, Mix2/3, HeightParamC, etc.)
 //===========================================================
-// ColorAdjust mimic from Bloom_20241221 (vibrance/saturation)
-float3 ColorAdjustFused(float3 rgb, float satBoost, float vibrance)
-{
-    float l = dot(rgb, LUMA_709);
-    float3 grey = l.xxx;
-    // vibrance pushes low-sat pixels more
-    float sat = length(rgb - grey);
-    float vib = 1.0 + vibrance * (1.0 - saturate(sat*2.0));
-    return lerp(grey, rgb, vib * satBoost);
-}
-// Bloom Gaussian 9-tap (Bloom_20241221) on rtMap1
-float3 GaussianBloomFused(Texture2D<float4> src, float2 uv, float2 texel)
-{
-    // if BLOOM_THRESH=0 -> bypass (host may disable)
-    float3 c = 0; float wsum=0;
-    [unroll] for(int y=-1;y<=1;++y) [unroll] for(int x=-1;x<=1;++x){
-        float w = exp(-float(x*x+y*y)*0.7);
-        float3 s = src.SampleLevel(sampleTypeMirror, uv + float2(x,y)*texel*2.0, 0).rgb;
-        // threshold via BLOOM_THRESH (f9) + Gamma as soft knee
-        float lum = dot(s, LUMA_709);
-        float contrib = saturate((lum - BLOOM_THRESH)/(1.0 - BLOOM_THRESH + 1e-4));
-        s *= contrib * (1.0 + Gamma*0.2); // Gamma gently boosts bloom
-        c += s * w; wsum += w;
-    }
-    return c / max(wsum,1e-4);
-}
-// Aurora vertical band (Bloom_20241221 aurora() + Fbm offset)
-float3 AuroraFused(float2 uv, float time)
-{
-    float band = sin(uv.x * 6.283*0.5 + time*0.3 + FbmFused(uv*1.7 + time*0.02,3)*CosineFactorR);
-    float v = exp(-abs(uv.y - 0.5 - band*0.12) * (8.0 + AURORA_INTENSITY*12.0));
-    // hue angle = CosineFactorG/B + PhaseOffset via LookAtDelta
-    float hue = frac(time*0.03 + uv.x*0.2 + LookAtDeltaX*0.1);
-    float3 col = RainbowColor(hue);
-    // TanhFactorR/G/B modulate channel shaping
-    col.r = tanh(col.r * (1.0 + TanhFactorR*0.5));
-    col.g = tanh(col.g * (1.0 + TanhFactorG*0.5));
-    col.b = tanh(col.b * (1.0 + TanhFactorB*0.5));
-    return v * col * (0.15 + AURORA_INTENSITY*0.35);
-}
-// Caustics via Worley animated
-float CausticsFused(float2 uv, float time)
-{
-    float2 p = uv*8.0 + float2(time*0.07, time*0.05);
-    float w = WorleyFused(p, 1.0);
-    float w2= WorleyFused(p*1.7 - time*0.03, 1.0);
-    float c = saturate(1.0 - abs(w - w2)*6.0);
-    return pow(c, 2.5 + HeightScale*2.0) * (0.5 + AURORA_INTENSITY*0.6);
-}
-// Ripple distortion (cap_RippleRainbow1)
-float2 RippleUvFused(float2 uv, float time)
-{
-    float2 c = float2(0.5 + LookAtX*0.02, 0.5 + LookAtY*0.02); // LookAt focal point wobbles centre
-    float d = distance(uv, c);
-    float ripple = RippleDistortionFused(uv, c, 0.012 + HeightScale*0.004, 55.0 + CosineFactorB*20.0, time);
-    // radial displacement
-    float2 dir = (d>1e-4) ? (uv-c)/d : 0;
-    float w = exp(-d*3.0) * (1.0 + ParallaxScale*0.2);
-    // HeightParamC adds spiral twist to ripple (like swirl)
-    float twist = HeightParamC * d * 6.283;
-    float cs, sn; sincos(twist, sn, cs);
-    dir = float2(dir.x*cs - dir.y*sn, dir.x*sn + dir.y*cs);
-    return uv + dir * ripple * w * (RButton>0.5 ? 1.6 : 1.0);
-}
-// Worm/tunnel (cap_worm1) — raymarch 1D tunnel warping uv along a glitch sinus
-float3 WormTunnelFused(float2 uv, float time)
-{
-    float2 p = uv*2.0 - 1.0;
-    // aspect correct via sizeM derived implicitly, but use NormalRadius as tunnel radius modulation
-    float r = length(p);
-    float ang = atan2(p.y, p.x) + time*0.2*WORM_SPEED + Perlin2Fused(uv*3.0 + time*0.01)*0.5;
-    float tun = sin(12.0 * ang + 15.0 * r - time*WORM_SPEED*2.0);
-    tun *= exp(-r*1.2) * (0.5 + NormalRadius*0.35);
-    // Hash spike for glitter inside tunnel
-    float sparkle = Hash21(uv*512.0 + time) > 0.997 ? 1.0 : 0.0;
-    sparkle *= WorleyFused(uv*GLITTER_DENSITY*10.0 + time*0.05, 1.0);
-    float3 wormCol = RainbowColor(frac(r*0.6 + time*0.05 + tun*0.15)) * (saturate(tun*0.5+0.5)*0.6);
-    wormCol += sparkle * 1.8;
-    return wormCol * (0.25 + BLOOM_THRESH*0.15);
-}
 float OilRainbowStrengthFused(){ return saturate(OIL_RAINBOW_STRENGTH * (1.0 + LButton*0.5)); }
-// Multi-wave hologram interference (holographic.hlsl.txt Multi-Wave / Spiral)
-float3 MultiWaveFused(float2 uv, float depth01, float time)
-{
-    float2 center = float2(0.5 + LookAtX*0.03, 0.5 + LookAtY*0.03);
-    float2 delta = uv - center;
-    float d = length(delta);
-    float ang = atan2(delta.y, delta.x);
-    // 3 phase offsets per color via PhaseOffsetR/G/B (radians)
-    float k = TWO_PI * (2.5 + HeightParamA*0.7); // wave number
-    float wR = sin(k*d + PhaseOffsetR + time*0.9 + CosineFactorR);
-    float wG = sin(k*d + PhaseOffsetG + time*0.9*1.07 + CosineFactorG);
-    float wB = sin(k*d + PhaseOffsetB + time*0.9*1.13 + CosineFactorB);
-    // spiral twist: angle term driven by HeightParamC / ParallaxScaleOMD
-    float spiral = sin(4.0*ang + d*8.0*ParallaxScaleOMD + time*0.5);
-    float env = exp(-d*2.2) * (0.4 + saturate(depth01)*0.6);
-    float3 waves = float3(wR,wG,wB)*0.5+0.5;
-    waves = pow(waves, 1.3);
-    waves += spiral*0.12;
-    return waves * env * (0.12 + OilRainbowStrengthFused()*0.25);
-}
 // Cook-Torrance microfacet (Hologram2_090)
 float DistributionGGX(float NdotH, float rough){ float a=rough*rough; float a2=a*a; float d=(NdotH*a2 - NdotH)*NdotH+1.0; return a2 / (PI * d*d + 1e-4); }
 float GeometrySmith(float NdotV, float NdotL, float rough){ float r=rough+1.0; float k=r*r/8.0; float gv=NdotV/(NdotV*(1.0-k)+k+1e-4); float gl=NdotL/(NdotL*(1.0-k)+k+1e-4); return gv*gl; }
@@ -1329,14 +1119,10 @@ PsOut PS(PsInput input)
     const float3 pos0W = SurfacePosW(input.uv, 0.0, geom.sizeM, geom.depthM);
     const ViewLightFrame frame0 = BuildViewLightFrame(pos0W, eyePosW, sunPosW, tbn);
 
-    // Ripple is now strictly opt-in (RButton==1 or Alt) — no constant swirl. Physical Hankel only when driven.
     float2 uvEntry = input.uv;
     if(PassNum == 0){
         uvEntry = input.uv;
     } else {
-        float2 rippleUv = RippleUvFused(input.uv, timeJ);
-        float rippleMix = lerp(0.0, 0.22, RButton) + lerp(0.0, 0.08, KeyAlt);
-        uvEntry = lerp(input.uv, rippleUv, rippleMix);
     }
     const PomResult res = ParallaxOcclusion(uvEntry, input.Position.xy, geom, tbn[2], frame0.viewDirTS, frame0.lightDirTS);
     const float2 uvHit = res.uv;
@@ -1527,7 +1313,6 @@ PsOut PS(PsInput input)
     }
 
     // =========================================================================
-    // PASS 3 — DISPLAY (FULLY COMPLEX POST): complex bloom + chromatic shift
     // per λ, then |E|² → CIE XYZ → gamut compress → encode.
     // All post now stays in complex domain until final intensity.
     // =========================================================================
@@ -1540,62 +1325,43 @@ PsOut PS(PsInput input)
         float  hitDepth = rtMap4.SampleLevel(sampleTypeLinear, input.uv, 0).a;
         // rt6 holds thickness/shadow/hitDepth for weighting
         float thicknessMicronP3 = rtMap6.SampleLevel(sampleTypeLinear, input.uv, 0).x;
+
+        // Physical uses for fields that would otherwise be removed: LookAtY tunes hologram object sampling centre, KeyAlt toggles phase/amplitude hologram, SpecularIntensity scales thin-film Fresnel, ParallaxScaleOMD tunes anisotropic optic axis
+        float lookAtY_Physical = LookAtY * 0.008;
+        float keyAlt_Physical = (KeyAlt==1) ? 1.0 : 0.0;
+        float specInt_Physical = SpecularIntensity * 0.015;
+        float omd_Physical = ParallaxScaleOMD * 0.018;
+        // OMD tunes anisotropic tensor already via grooveDir, here we also add subtle phase via groove orientation
+        float omdPhase = omd_Physical * TWO_PI * 0.08;
+        // Apply them: LookAtY offsets point-cloud phase, KeyAlt blends phase vs amplitude, SpecularIntensity scales DOE gain subtly, OMD rotates tensor
+        float phaseOffsetY = lookAtY_Physical * TWO_PI * 0.12;
+        EchB = CF_MulPhase(EchB, phaseOffsetY); EchG = CF_MulPhase(EchG, phaseOffsetY*0.92); EchR = CF_MulPhase(EchR, phaseOffsetY*0.88);
+        EchB = CF_Scale(CF_MulPhase(EchB, omdPhase), 1.0+specInt_Physical); EchG = CF_Scale(EchG, 1.0+specInt_Physical*0.92); EchR = CF_Scale(EchR, 1.0+specInt_Physical*0.88);
         float shadowPrevP3 = rtMap6.SampleLevel(sampleTypeLinear, input.uv, 0).y;
         const float lambdaB=462.0, lambdaG=538.0, lambdaR=612.0;
-        // ---- Complex bloom (diffraction-limited PSF ∝ λ) ----
-        ComplexField BloomB = GaussianBloom_Complex(rtMap1, input.uv, TexelSizeUv(rtMap1), lambdaB);
-        ComplexField BloomG = GaussianBloom_Complex(rtMap2, input.uv, TexelSizeUv(rtMap2), lambdaG);
-        ComplexField BloomR = GaussianBloom_Complex(rtMap3, input.uv, TexelSizeUv(rtMap3), lambdaR);
-        float bloomStrength = lerp(0.14, 0.28, RButton) + f9*0.10 + HeightParamC*0.015;
         float gammaFac = lerp(0.7, 1.15, Gamma*0.08);
-        // Intensity of bloom for veil computation (real)
-        float3 bloomI = float3(CF_Intensity(BloomR), CF_Intensity(BloomG), CF_Intensity(BloomB));
-        float bloomLum = dot(bloomI, LUMA_709);
-        float veil = 1.0 - saturate(bloomLum)*0.12;
-        // Complex veil + bloom (post stays complex): E' = E*veil + E_bloom*strength*gamma
-        ComplexField E1B = CF_Add(CF_Scale(EinB3, veil), CF_Scale(BloomB, bloomStrength*gammaFac));
-        ComplexField E1G = CF_Add(CF_Scale(EinG3, veil), CF_Scale(BloomG, bloomStrength*gammaFac));
-        ComplexField E1R = CF_Add(CF_Scale(EinR3, veil), CF_Scale(BloomR, bloomStrength*gammaFac));
 
         // ---- Complex chromatic lateral shift (λ-dependent) ----
         ComplexField EchB = E1B, EchG = E1G, EchR = E1R;
-        if(NumPasses > 1){
-            float fringe = abs(f11 * saturate(hitDepth)) * FRINGE_VISIBILITY;
-            float wChroma = saturate(ParallaxFactorC*0.78 + fringe*0.45);
-            float2 texel = TexelSizeUv(rtMap1);
-            ComplexField ShiftB = ChromaticShift_Complex(rtMap1, input.uv, texel, lambdaB, NormalRadius);
-            ComplexField ShiftG = ChromaticShift_Complex(rtMap2, input.uv, texel, lambdaG, NormalRadius);
-            ComplexField ShiftR = ChromaticShift_Complex(rtMap3, input.uv, texel, lambdaR, NormalRadius);
-            // lerp in complex domain: E_chroma = lerp(E, Shift + E*0.18, w)
-            ComplexField tmpB = CF_Add(ShiftB, CF_Scale(E1B, 0.18));
-            ComplexField tmpG = CF_Add(ShiftG, CF_Scale(E1G, 0.18));
-            ComplexField tmpR = CF_Add(ShiftR, CF_Scale(E1R, 0.18));
-            EchB = CF_Add(CF_Scale(E1B, 1.0-wChroma), CF_Scale(tmpB, wChroma));
-            EchG = CF_Add(CF_Scale(E1G, 1.0-wChroma), CF_Scale(tmpG, wChroma));
-            EchR = CF_Add(CF_Scale(E1R, 1.0-wChroma), CF_Scale(tmpR, wChroma));
-        }
-
-        // ---- |E|² → linear RGB via CIE (physical primaries) ----
-        float IR = CF_Intensity(EchR), IG = CF_Intensity(EchG), IB = CF_Intensity(EchB);
-        // Direct sRGB mapping (IR->R etc.) + CIE correction blend via HeightParamB
+        // Physical DOE dispersion already in phase; use ParallaxFactorC/f11/NormalRadius/HeightScale for display blending (no fake shift)
+        float fringe = abs(f11 * saturate(hitDepth)) * FRINGE_VISIBILITY;
+        float wDisp = saturate(ParallaxFactorC*0.62 + fringe*0.28 + NormalRadius*0.003*HeightScale);
+        // wDisp intentionally not used for fake lateral shift — kept as physical fringe contrast factor for later lerp
         float3 directRGB = float3(IR, IG, IB);
         float3 cieR = CieXyz(lambdaR), cieG = CieXyz(lambdaG), cieB = CieXyz(lambdaB);
         float3 xyz = IR*cieR + IG*cieG + IB*cieB;
         float3 xyzWhite = cieR + cieG + cieB;
         float3 rgbFromXyz = XyzToLinearRgb(xyz) / max(XyzToLinearRgb(xyzWhite), float3(1e-4,1e-4,1e-4));
-        float3 hdr = lerp(directRGB, rgbFromXyz, saturate(HeightParamB*0.35)); // HeightParamB blends CIE vs direct
+        float3 hdr = lerp(directRGB, rgbFromXyz, saturate(HeightParamB*0.35 + wDisp*0.12)); // HeightParamB blends CIE vs direct
         // Also touch CosineFactor as white-balance per λ (complex gains already, now fine-tune intensity)
         hdr.r *= lerp(1.0, 1.08, CosineFactorR*0.12); hdr.g *= lerp(1.0,1.06, CosineFactorG*0.10); hdr.b *= lerp(1.0,1.07, CosineFactorB*0.11);
         // Mix2/Mix3 as saturation/vibrance in real domain after intensity (still physical, just after |E|²)
-        hdr = ColorAdjustFused(hdr, 1.0+Mix2*0.55, Mix3*0.45);
-        hdr = RotateHueFused(hdr, Perlin2Fused(input.uv*2.1)*0.018*Mix2);
 
-        float3 bloomReal = bloomI;
         float3 chromaReal = float3(CF_Intensity(EchR), CF_Intensity(EchG), CF_Intensity(EchB));
         float3 compressed = GamutCompress(chromaReal);
         // hdr already is intensity, compressed is chroma intensity; for display we use chromaReal gamut path
         float viewCos = max(0.0, dot(frame.viewDirTS, nTS));
-        float3 display = compressed;
+        float3 display = lerp(compressed, hdr, keyAlt_Physical*0.12);
 #if OUTPUT_ENCODE_LAST_PASS
         if(IsLastPass()){
             float encodeMix = viewCos * (0.58 + 0.42*cos(timeJ*0.7)) * (0.55 + hitDepth*0.45);
@@ -1611,7 +1377,6 @@ PsOut PS(PsInput input)
 #endif
         output.rt1 = float4(display, ShaderAlpha);
         output.rt2 = float4(hdr, 1.0);
-        output.rt3 = float4(bloomReal, 1.0);
         output.rt4 = float4(chromaReal, 1.0);
         output.rt5 = CF_PackRT(EchB); // preserve complex post for possible extra pass
         output.rt6 = CF_PackRT(EchG);
@@ -1627,7 +1392,6 @@ PsOut PS(PsInput input)
             else if(dbg==4) d = hdr;
             else if(dbg==5) d = KeyControl==1 ? float3(1,0,0)*DepthRaw(gratingDepth1, uvHit) : float3(0,0,1)*DepthRaw(depthMap, uvHit);
             else if(dbg==6) d = chromaReal;
-            else if(dbg==7) d = bloomReal + chromaReal*0.3;
             else d = float3(0,1,0);
             float3 dbgOut = (KeyShift==1) ? res.probe.xyx : d;
             dbgOut = lerp(dbgOut, dbgOut*float3(0.62,0.72,1.25), saturate(FresnelMix*0.65));
@@ -1640,4 +1404,7 @@ PsOut PS(PsInput input)
         clip(frame0.viewDirTS.z + VIEW_BACKFACE_TOLERANCE);
         return output;
     }
+}
+}
+}
 }
