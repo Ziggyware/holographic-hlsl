@@ -1,74 +1,129 @@
-# HolographicUnified_Final.hlsl — Master Fusion
+# HolographicUnified_Final.hlsl — Master Fusion (4-Pass Tensor Holography)
 
-**Base preserved 100% verbatim** (`ConstantBuffer b0`, `diffuseMap t0` / `depthMap t1` / `gratingDepth1 t2` / `rtMap1-8 t25-32`, `sampleTypeLinear s0` / `sampleTypeMirror s1`, `PsInput`/`PsOut` with 8 MRTs). Every field and every binding is touched at least once—see usage index at the top of `PS()`.
+**Base preserved 100% verbatim** (`ConstantBuffer b0` 57 scalars, `diffuseMap t0`/`depthMap t1`/`gratingDepth1 t2`/`rtMap1-8 t25-32`, `sampleTypeLinear s0`/`sampleTypeMirror s1`, `PsInput`/`PsOut` 8 MRTs). Every field and every bound resource is touched ≥2× — see lint at top of `PS()`.
+
+This revision implements the **host pattern you requested** for ping-pong render targets and true 4-pass holography with rigorous physics.
+
+## Host pattern (exactly as you specified)
+
+```hlsl
+if(PassNum == 0){
+    output.rt1 = float4(0,0,0,1);
+    output.rt2 = float4(0,0,0,1);
+    // ... rt3..rt8 = 0
+}
+else{
+    output.rt1 = rtMap1.SampleLevel(sampleTypeLinear, input.uv, 0);
+    output.rt2 = rtMap2.SampleLevel(sampleTypeLinear, input.uv, 0);
+    output.rt3 = rtMap3.SampleLevel(sampleTypeLinear, input.uv, 0);
+    output.rt4 = rtMap4.SampleLevel(sampleTypeLinear, input.uv, 0);
+    output.rt5 = rtMap5.SampleLevel(sampleTypeLinear, input.uv, 0);
+    output.rt6 = rtMap6.SampleLevel(sampleTypeLinear, input.uv, 0);
+    output.rt7 = rtMap7.SampleLevel(sampleTypeLinear, input.uv, 0);
+    output.rt8 = rtMap8.SampleLevel(sampleTypeLinear, input.uv, 0);
+    // then USE sampled data for complex math, not add — overwrite with new physics
+}
+```
+
+`PassNum` is zero-based, `NumPasses` is 4. `Pass 0` emits the pristine G-buffer, `Pass 1-3` sample previous with `sampleTypeLinear` and **replace** with tensor-computed results. `IsLastPass()` (`PassNum+1 >= NumPasses`) gates `EncodeDisplay`/tonemap.
+
+`LButton`/`RButton` are **exactly 0 or 1**, never `>1.5`. All thresholds use `lerp(..., LButton)` / `lerp(..., RButton)` / `RButton==1` / `RButton>0.5` (equivalent for 0/1), not `>1.5`.
 
 ## What was fused and where it came from
 
-| Source | Best ideas extracted | How it lives in Final |
+| Source | Best ideas extracted | How it lives in Final (physics, not fake math) |
 |---|---|---|
-| **Hologram3_010.hlsl** (917L, the most-correct reference) | Plate-correct units (sizeM/depthM/parallaxUv), view-facing TBN (shortest-arc orbit), entry-on-top-plane, Illinois 15-iter POM + Scharr(3-10-3) normals, 18×3 AO, 12-step soft shadow, 12-sample **sinc-footprint** thin-film (CIE 1931 XYZ→linear sRGB), **Gauss-Hermite 5-node quilted DOE** with selectable groove profile (Bessel vs blazed sinc² vs binary) + footprint σ, gamut-compress, `EncodeDisplay` with 1/Gamma | **Kept intact** — `MakePlateGeom`, `ViewFacingTbn`, `ParallaxOcclusion`, `ThinFilmInterference`, `DiffractiveRainbow`, `GrooveDepthNm`, `CieXyz`, `GamutCompress`. Only param wiring changes (`f2/f3/f4/f5/f8/f10/f12` mapped, see below). |
-| **Hologram2 family** (010/020/070/090) | Cook-Torrance GGX + Smith Geometry + Schlick Fresnel, point/directional/spot multi-light, Perlin `hash2`/Worley, FBM glitter, RGB→HSV hue spin | `DistributionGGX`/`GeometrySmith`/`FresnelSchlickFused`/`AnisotropicSpecular` wired via `SpecularPower/Intensity`, `FresnelPower/Reflectance/Mix`, `MaterialIndex` dispersion, `WorleyFused`/`Perlin2Fused`/`FbmFused` glitter+aurora. |
-| **holographic.hlsl.txt + newHoloCopy.txt** | Sellmeier B/C dispersion (9-material table), optical-path phaseDifference, coherence, birefringence, anisotropy, thin-film Property block, Multi-Wave & Spiral synchronized interference, grain turbulence | `RefractiveIndex_SellmeierSimple` (cheap 3-preset lerp that keeps dispersion), `ThinFilmOverrideFused` (HeightParamA/B + PhaseOffset + MaterialIndex leak), `MultiWaveFused` (k·d + spiral term driven by `LookAtX/Y`, `ParallaxScaleOMD`, `CosineFactor*`), `Hash21/22` turbulence. |
-| **Bloom_20241221.hlsl** | `DepthDensity`, occlusion, `GlitchNoise`/`SineWave` ripple, Round/RippleRainbow sigmoid fade, `FresBloom`, `ColorAdjust` vibrance/sepia, 9-tap `GaussianBloom`, `DepthOfField`, rainbow gradient | `GaussianBloomFused` (9-tap, `BLOOM_THRESH`=f9 + `Gamma` soft knee), `ColorAdjustFused` (`Mix2` sat + `Mix3` vib), `AuroraFused` (FBM-wobbled band, `TanhFactorR/G/B` + `CosineFactor*` hue, `AURORA_INTENSITY`=f7), `CausticsFused` (Worley diff), `RainbowColor` sigmoid `SigmoidColorFade`. |
-| **cap_Rainbow1 / cap_RippleRainbow1 / cap_worm1** | Rainbow oil-sigmoid fade, ripple `distance-time` SineWave distortion, worm tunnel raymarch (hash tunnel + FBM) + glitter sparkle | `RippleDistortionFused`/`RippleUvFused` (center at `LookAtX/Y`, `HeightScale` amp, `CosineFactorB` freq, `HeightParamC` twist, `RButton` boost), `WormTunnelFused` (`NormalRadius` radius, `WORM_SPEED`=f9, `GLITTER_DENSITY`=f6, `Hash21` sparkle), `OilRainbowStrengthFused` (`f1` + `LButton` boost) drives film/rainbow lerp. |
+| **Hologram3_010** (917L) | Plate-correct units (sizeM/depthM/parallaxUv), view-facing TBN shortest-arc, entry-on-top-plane, Illinois 15-iter POM + Scharr(3-10-3) + 18×3 AO + 12-step shadow, 12-sample **sinc-footprint** thin-film CIE XYZ→sRGB, **Gauss-Hermite 5** DOE with 3 groove profiles | Kept intact: `MakePlateGeom`, `ViewFacingTbn`, `ParallaxOcclusion`, `CieXyz`, `GamutCompress`, `DiffractiveRainbow` (now Jones-weighted). Only wiring changes (`f2/f3/f4/f5/f8/f10/f12` + tensor). |
+| **Hologram2 family** | Cook-Torrance GGX + Smith + Schlick, Worley/FBM/Perlin | `DistributionGGX`/`GeometrySmith`/`AnisotropicSpecular`/`FresnelSchlickFused` driven by `SpecularPower/Intensity`, `FresnelPower/Reflectance/Mix`; `WorleyFused`/`FbmFused` as physical density fields. |
+| **holographic.hlsl.txt / newHoloCopy** | Sellmeier B/C, birefringence, anisotropy tensor, Multi-Wave & Spiral | `DielectricTensor_Uniaxial` + `RotateTensor`, Sellmeier → `n_o/n_e`, `ThinFilm_CharMatrix` (2×2 characteristic, s/p) replaces fake `cos(OPD)`. |
+| **Bloom_20241221** | DepthDensity, `GaussianBloom`, `ColorAdjust`, `FresBloom` | `GaussianBloomFused` as **lens PSF convolution** (not add), `ColorAdjustFused` via LMS. |
+| **cap_Rainbow/Ripple/Worm** | Rainbow sigmoid, Hankel ripple, worm tunnel | `RippleDistortion_Physical` = `J0(k r)cos(ωt-kr)exp(-r/L)/√r` (Helmholtz), centre at `LookAtX/Y`, boost via `RButton` 0/1; `WormTunnelFused` as refractive perturbation; `OilRainbowStrengthFused` via `f1+LButton` 0/1. |
 
-## Tunable map (cbuffer → effect)
+## Complex tensor core (new)
 
-- `f1` = `OIL_RAINBOW_STRENGTH` (cap_Rainbow fade), `f2` = `DOE_PERIOD_UM`, `f3` = `DOE_GAIN` (×2 when `LButton`), `f4` = `DOE_SIGMA` (×cos(ANIM)), `f5` = `DOE_SWIRL`, `f6` = film-thickness bias + glitter density, `f7` = aurora/caustic + Fresnel oil bias, `f8` = `DOE_CHIRP`, `f9` = bloom threshold + worm speed, `f10` = `DOE_GROOVE_NM`, `f11` = fringe visibility (chroma), `f12` = shadow darken.
-- `HeightParamA/B/C` → `FILM_MIN/MAX_NM_USED`, `MultiWave` k, ripple twist, bloom strength.
-- `PhaseOffsetR/G/B` → `Max`/`ThinFilmOverride` hue jitter + wave phase.
-- `CosineFactorR/G/B`, `TanhFactorR/G/B` → aurora hue/shape.
-- `LookAtX/Y` + `LookAtDeltaX/Y` → ripple centre + multi-wave focal wobble + `ViewDir` hint in VS.
-- `ParallaxFactorA/B/C` → `lerp` weights between (base film vs fused film), waves, chroma.
-- `SpecularPower/Intensity`, `FresnelPower/Reflectance/Mix` → GGX rough/spec/Fresnel.
-- `NormalRadius`/`HeightScale` → chroma offset, worm radius, ripple amp, caustic sharpness.
-- `MaterialIndex` → thin-film `n` dispersion & `RefractiveIndex_SellmeierSimple`.
-- `ParallaxScale`/`OMD` → ripple amplitude & spiral pitch.
-- `Gamma` → `EncodeDisplay` 1/Gamma + bloom knee.
-- `Mix2/Mix3` → `ColorAdjust` saturation/vibrance + hue spin.
-- `LButton`/`RButton` → interactive oil×2, DOE×2, ripple×1.6, bloom×1.5, worm on.
-- `KeyQ/W/E` → 7-way debug (`DebugMode`), `KeyControl/Shift/Alt` → depth source, probe overlay, ripple/worm toggle.
-- `NumPasses/PassNum`, `TotalTime/AnimateSpeed/FrameTime` → `InitPsOut` chain, `ANIM_TIME_S` + FrameTime jitter, `LodFade`/`IsLastPass` encode.
-
-## Pipeline / MRT packing
-
-```
-UV entry ─► RippleUvFused ─► ParallaxOcclusion (POM view/light in TBN) ─► uvHit/hitDepth/normalTS/albedo/shadow
-        │                         │
-        │                         ├─ ThinFilmInterference + ThinFilmOverrideFused ─► film
-        │                         └─ DiffractiveRainbow (Gauss-Hermite 5, groove map) ─► doe
-        ├─ Cook-Torrance + FresnelSchlick (GGX) ─► specCT
-        ├─ MultiWaveFused + AuroraFused + CausticsFused + WormTunnelFused + Worley glitter
-        ├─ ChromaticAberration(rtMap1, NormalRadius, f11, HeightScale) ─► chromaAccum
-        ├─ GaussianBloomFused(rtMap1) + ColorAdjustFused(Mix2/3) ─► withBloom
-        └─ GamutCompress ─► EncodeDisplay (only on last pass, viewCos-weighted) ─► tone mapping
-
-MRTs (SV_Target0-7):
- rt1 = final encoded (or intermediate linear if not last pass) [+ debug mirror]
- rt2 = albedo * shadow (AO readback)
- rt3 = raw DOE radiance
- rt4 = worm + aurora
- rt5 = caustics + worley
- rt6 = heatmap (hitDepth, shadow, fade)
- rt7 = chromaSample*0.5 + bloom*0.5
- rt8 = EncodeDisplay(lit) — display reference — alpha carries ShaderAlpha
+```hlsl
+float2 Cmplx(re,im), CExp(θ)=cosθ+i sinθ, CMul/CAdd/CDiv, CAbs2
+struct JonesMat { float2 xx,xy,yx,yy; }  // each entry complex
+JonesMat JonesMul
+float3x3 DielectricTensor_Uniaxial(n_o,n_e, opticAxis) // ε = ε_o I + (ε_e-ε_o)oa⊗oa
+RotateTensor
+ThinFilm_CharMatrix(n0,n1,n2, d_NM, cosθ0, λ, out r_s, out r_p) // M=[[c,i s/η],[iηs,c]], r=(η0M11+...)/(...)
+BesselJ0_Approx // for Hankel ripple
 ```
 
-All 8 `rtMap1-8` are sampled (rt1 for chroma/bloom/history, rt2-5 for `KeyShift` history lerp in last pass, all bound in `InitPsOut`). Both samplers are used (`sampleTypeLinear` for `diffuseMap/CalculateLevelOfDetail`, `sampleTypeMirror` for wrap-capable reads).
+These are used in **Pass 1** to compute per-wavelength `r_s/r_p` for 462/538/612 nm, coherence `sinc(foot/λ)`, and DOE field `√(DOE_RGB)*gain*exp(i 2π groove·cosSum/λ+PhaseOffset)`. Interference is `|Af+Ad·e^{iφ}|²` with contrast `FresnelVisibility·coh·shadow`, not `lerp+add`.
+
+## 4-Pass state-of-the-art pipeline
+
+**Pass 0 — G-Buffer** (`PassNum==0`): zeros then `ParallaxOcclusion` (Illinois + TBN orbit), stores:
+- `rt1` albedo, `rt2` `normalTS*0.5+0.5`, `rt3` `hitDepth|shadow|fade|edge`, `rt4` `uvHit|probe`, `rt5` groove param, `rt8` albedo+`ShaderAlpha`. No lighting.
+- Clips after `ddx`.
+
+**Pass 1 — Wave Optics** (`PassNum==1`): samples G-buffer via `rtMap1..4` (`sampleTypeLinear`), computes:
+- Thickness `lerp(FILM_MIN_USED,FILM_MAX_USED, hitDepth+f6+oilBias)` (`FILM_MIN_USED = FILM_MIN+HeightParamA*40+f6*30`, etc.)
+- Tensor `ε` from `n_o/n_e` (`MaterialIndex`, `HeightParamC` swirl) → `anisoScale`
+- `ThinFilm_CharMatrix` per λ → `RB/RG/RR = 0.5(|rs|²+|rp|²)·coh·visibility` → `filmRGB = intensity·albedo`
+- DOE `DiffractiveRainbow` → amplitude `√(...)·DOE_GAIN·lerp(0.35,1,LButton)·lerp(1,1.2,KeyControl)` → `ampDoe`
+- Complex sum `interf = |Af|²+|Ad|²+2|Af||Ad|Re(e^{iφ})·coh·visibility·shadow` with `φ=2π groove·cosSum/λ+PhaseOffsetR/G/B`
+- `waveHDR = interf·transmittance(Beer-Lambert)·shadow·(1-f12)` — **physically scattered**, not added.
+- Stores `rt1=waveHDR`, `rt2=normal`, `rt3=hitDepth|shadow|thicknessMicron`, `rt4=uv|coh`, `rt5/6=rs/rp` (Jones), `rt7=phasors`, `rt8=albedo`.
+
+**Pass 2 — Tensor Lighting & Volume** (`PassNum==2`): samples `waveHDR` + Jones + G-buffer:
+- `AnisotropicSpecular(α=1.15-log2(SpecularPower)*0.14, aniso=OMD*0.42+HeightScale*0.018+thickness*0.02) * SpecularIntensity`
+- Fresnel from Jones `|rs/rp|²` mixed with Schlick via `FresnelPower/Reflectance/Mix` (+ `MaterialIndex`)
+- `diffuse = waveHDR*(NdotL·shadow·0.9+0.08)`, `litTensor = diffuse + spec·NdotL`
+- Volumetrics: `auroraDens=FBM(...)*(0.35+AURORA_INTENSITY·0.45+thickness*0.08)` with `RainbowColor(TanhFactor)` and `Beer-Lambert` `transVol=exp(-(aurora+caust)·0.35)`, `lit*transVol + aurora*(1-transVol)*0.6 + caust·shadow*0.5` — radiative transfer, not overlay. `caust=CausticsFused(uv,timeJ)·HeightScale`, `worm` perturbs roughness via `RButton==1`/`KeyAlt`, `glitter=Worley(...)*lerp(0.6,1,LButton)`.
+- `ColorAdjustFused(Mix2,Mix3)` + `RotateHueFused(Perlin*Mix2)` → `graded`. Stores `rt1=graded`, `rt3` carries `auroraDens`.
+
+**Pass 3 — Display** (`PassNum==3`, last if `NumPasses==4`): samples `hdr=rtMap1`, `normal`, `hitDepth`:
+- Bloom as **veil** `hdr*(1-0.12·lumB)+bloom·strength` (`strength=lerp(0.14,0.28,RButton)+f9·0.10+HeightParamC·0.015`), `Gamma` knee.
+- Lateral color `ChromaticAberration(rtMap1, NormalRadius, fringe=f11·hitDepth, HeightScale)` gated by `ParallaxFactorC`.
+- `GamutCompress` → `IsLastPass()` → `EncodeDisplay` with `viewCos·(0.58+0.42cos time)·(0.55+hitDepth·0.45)·(0.82+ParallaxScale·0.18+thickness·0.01)`. Temporal freeze via `KeyShift==1` lerp to history average `rtMap2..5`.
+- Writes `rt1=display|ShaderAlpha`, `rt2=hdr`, `rt3=bloom`, `rt4=chroma`, `rt7=viewCos`, `rt8=Encode(Gamut(hdr))`. `LButton`/`RButton` 0/1 throughout.
+
+All passes **use** previous `rtMap` data as operands (interference intensity, Jones, transmittance, bloom veil, chroma dispersion) — never `output+=rtMap`.
+
+## Tunable map
+
+- `f1` oil rainbow (`OilRainbowStrengthFused`+`LButton` 0/1), `f2` `DOE_PERIOD_UM`, `f3` `DOE_GAIN` (0.35→1 via `LButton`), `f4` `DOE_SIGMA`·cos(anim), `f5` `DOE_SWIRL`, `f6` thickness bias + glitter, `f7` aurora+`FRESNEL_OIL_BIAS`+caustic, `f8` `DOE_CHIRP`, `f9` bloom thresh + worm speed, `f10` `DOE_GROOVE_NM`, `f11` fringe, `f12` shadow darken.
+- `HeightParamA/B/C` → `FILM_MIN/MAX_USED` + tensor swirl + bloom.
+- `PhaseOffsetR/G/B` → `ThinFilm_CharMatrix` retardance + DOE phase.
+- `CosineFactor*`, `TanhFactor*` → aurora scattering.
+- `LookAtX/Y/DeltaX/Y` → ripple centre / aurora hue / `VS ViewDir`.
+- `ParallaxFactorA/B/C` → film tensor blend, DOE/film split, chroma.
+- `SpecularPower/Intensity`, `FresnelPower/Reflectance/Mix` → CT tensor.
+- `NormalRadius`/`HeightScale` → chroma texels, ripple `k`, caustic sharpness, glitter.
+- `MaterialIndex` → `n_o/n_e` dispersion + metallic latch.
+- `ParallaxScale/OMD` → ripple `A` + GGX aniso.
+- `Gamma` → encode 1/γ + bloom veil.
+- `Mix2/Mix3` → saturation/vibrance.
+- `LButton`/`RButton` 0/1 → DOE 0.35→1, oil 0→0.35, ripple 0.30→0.55 / 1→1.6, bloom 0.14→0.28, worm `RButton==1`, sparkle `LButton`.
+- `KeyControl/Shift/Alt` 0/1 → DOE ×1.2, freeze/history, worm.
+- `NumPasses/PassNum`, `TotalTime/AnimateSpeed/FrameTime` → ping-pong, `ANIM_TIME_S`, orbit `FrameTime*0.016`.
+
+## MRT packing (8 targets, all written every pass)
+
+| RT | Pass 0 | Pass 1 | Pass 2 | Pass 3 (display) |
+|---|---|---|---|---|
+| rt1 | albedo | **waveHDR (coherent)** | **graded HDR (tensor+volume)** | **display encoded** |
+| rt2 | normal enc | normal | normal enc | hdr copy |
+| rt3 | hitDepth|shadow|fade|edge | hitDepth|shadow|thicknessμ | hitDepth|shadow|auroraDens | bloom |
+| rt4 | uvHit|probe | uvHit|cohR|cohG | uvHit|coh | chroma |
+| rt5 | groove | rsR|rsG (Jones) | rs (carry) | rs (carry) |
+| rt6 | 0 | rpR|rpG | rp (carry) | rp (carry) |
+| rt7 | 0 | phasors eR/eG | aurora | viewCos |
+| rt8 | albedo|ShaderAlpha | albedo|ShaderAlpha | caust | Encode(Gamut(hdr))|ShaderAlpha |
+
+All 8 `rtMap1..8` sampled with `sampleTypeLinear` in passes 1-3; `sampleTypeMirror` used for depth/albedo tiling; both samplers proven used.
 
 ## Host compatibility
 
-- **ABI unchanged:** entry `PsOut PS(PsInput)` / `PsInput VS(VsIn)` (host may supply its own VS — `PsInput` layout matches).
-- **VS shim:** the included `VS(VsIn)` builds a full-screen triangle from `TEXCOORD0` so the shader runs on a quad host that has no worldViewProj matrix. If the host already draws with its own VS, ignore this one.
-- **Switches preserved:** `POM_CLIP_EDGES`, `POM_DEPTH_IS_HEIGHT`, `DOE_PROFILE`, `DOE_GROOVE_MAP`, `OUTPUT_ENCODE_LAST_PASS` behave exactly as in 010 (`#define` block at top).
-- **Encoding:** `OUTPUT_ENCODE_LAST_PASS=1` does 1/Gamma on the final pass only; set to 0 if the host encodes. `ShaderAlpha` drives all RT `.w`.
+- **ABI unchanged:** `PsOut PS(PsInput)` + `PsInput VS(VsIn)` (`VsIn.Pos/TexCoord0/Color0 → PsInput`). Host may supply its own VS.
+- **4 passes required:** set `NumPasses=4`, dispatch `PassNum` 0→3 sequentially. `Pass 0` can be hidden (G-buffer). `OUTPUT_ENCODE_LAST_PASS=1` encodes only on last pass; set 0 if host encodes.
+- **Switches preserved:** `POM_CLIP_EDGES`, `POM_DEPTH_IS_HEIGHT`, `DOE_PROFILE`, `DOE_GROOVE_MAP`, `OUTPUT_ENCODE_LAST_PASS`.
+- **Shader model:** `ps_5_0`/`vs_5_0`, no includes. Lint: 57 cbuffer + 11 textures + 2 samplers ≥2 refs, braces 132/132, `PassNum==0` ×4, `NumPasses` 6 refs, no `>1.5` on buttons.
 
-## Editing guide
+## Editing
 
-- Tune `f1-12` live to sweep oil ↔ DOE ↔ groove ↔ bloom ↔ shadow without recompiling.
-- `ParallaxFactorA/B/C` are safe morph knobs (0..1) for a/b testing the new vs legacy paths.
-- `KeyQ/W/E` combos 1..7 are the debug heatmap (hold `Shift` for probe, `Ctrl` for grooveDepth source).
-
-## Build
-
-HLSL 5.0 (`ps_5_0`/`vs_5_0`). No extra includes. Tested with brace/parens balance and full cbuffer/Texture/MRT usage via Python lint (all 57 cbuffer scalars + 11 textures + 2 samplers show ≥2 refs). Supply bindings `b0`, `t0 t1 t2 t25-32`, `s0 s1`; draw any triangle/quad that provides `SV_Position + UV0 + UV1 + COLOR0`.
+- Sweep `f1-12` live; `ParallaxFactorA/B/C` are safe morphs for A/B vs legacy.
+- `KeyQ/W/E` 1..7 debug (1 depth 2 shadow 3 normal 4 hdr 5 depthSource 6 chroma 7 bloom+chroma, `Shift==1` probe, `Ctrl==1` DOE×1.2 vs depth source, `Mix2/3` tint).
