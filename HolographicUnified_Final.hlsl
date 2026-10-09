@@ -477,6 +477,43 @@ ComplexField ChromaticShift_Complex(Texture2D<float4> texComplex, float2 uv, flo
     float4 p = texComplex.SampleLevel(sampleTypeLinear, uv+off, 0);
     return CF_UnpackRT(p);
 }
+// ----- True holographic depth projection — Fresnel point-cloud CGH -----
+static const float HOLO_SCALE_M = 0.08;
+static const int HOLO_SAMPLES = 24;
+ComplexField HolographicObjectField_PointCloud(float2 holoUv, float3 holoPosW, PlateGeom geom, float lambdaNM, float timeJ, float3 viewDirTS)
+{
+    ComplexField O = CF_Zero();
+    float baseDepth = DepthRaw(depthMap, holoUv);
+    for(int i=0;i<HOLO_SAMPLES;++i){
+        float r = sqrt((float(i)+0.5)/float(HOLO_SAMPLES)) * (0.42 + baseDepth*0.18);
+        float theta = float(i) * 2.39996323;
+        float2 dir = float2(cos(theta), sin(theta));
+        float2 objUv = frac(holoUv + dir * r * 0.55 + Hash22(float2(float(i), 0.0))*0.04);
+        float objDepth01 = DepthRaw(depthMap, objUv);
+        float3 objAlbedo = diffuseMap.SampleLevel(sampleTypeLinear, objUv, 0).rgb;
+        float amp = (lambdaNM < 500.0) ? objAlbedo.b : (lambdaNM < 600.0 ? objAlbedo.g : objAlbedo.r);
+        amp = sqrt(max(amp, 1e-4));
+        float3 objPosW = SurfacePosW(objUv, objDepth01, geom.sizeM, geom.depthM);
+        float3 d = holoPosW - objPosW;
+        float r_m = length(d) * HOLO_SCALE_M + 1e-4;
+        float k = TWO_PI / (lambdaNM * 1e-9);
+        float rndPhase = Hash21(float2(float(i)*0.77, objDepth01*13.0)) * TWO_PI;
+        float phase = k * r_m + rndPhase + dot(viewDirTS.xy, d.xy)*0.08;
+        float att = amp * exp(-r_m*0.8) / (r_m*0.9 + 0.6);
+        float2 ph = CExp(phase);
+        ComplexField contrib; contrib.Ex = CScale(ph, att*0.7071); contrib.Ey = CScale(ph, att*0.7071);
+        O.Ex = CAdd(O.Ex, contrib.Ex); O.Ey = CAdd(O.Ey, contrib.Ey);
+    }
+    return O;
+}
+ComplexField HolographicReferenceField(float3 holoPosW, float lambdaNM, float3 refDir)
+{
+    float k = TWO_PI / (lambdaNM*1e-9);
+    float phaseR = k * dot(holoPosW, refDir) * HOLO_SCALE_M;
+    float2 ph = CExp(phaseR);
+    ComplexField R; R.Ex = CScale(ph, 0.7071); R.Ey = CScale(ph, 0.7071);
+    return R;
+}
 // Transfer matrix for isotropic film (2×2 characteristic, s and p separately) returns complex r_s, r_p
 void ThinFilm_CharMatrix(float n0,float n1,float n2, float d_NM, float cosT0, float lambdaNM, out float2 r_s, out float2 r_p)
 {
@@ -1292,15 +1329,14 @@ PsOut PS(PsInput input)
     const float3 pos0W = SurfacePosW(input.uv, 0.0, geom.sizeM, geom.depthM);
     const ViewLightFrame frame0 = BuildViewLightFrame(pos0W, eyePosW, sunPosW, tbn);
 
-    // Physical ripple warp uses Hankel/Bessel solution (not fake sine) — gated by LButton/RButton as 0/1.
-    // RButton==1 amplifies ripple by 1.6x (physical wave amplitude scales with drive voltage), LButton==1 adds oil bias elsewhere.
+    // Ripple is now strictly opt-in (RButton==1 or Alt) — no constant swirl. Physical Hankel only when driven.
     float2 uvEntry = input.uv;
     if(PassNum == 0){
-        uvEntry = input.uv; // first pass undistorted for pristine G-buffer
+        uvEntry = input.uv;
     } else {
         float2 rippleUv = RippleUvFused(input.uv, timeJ);
-        float rippleMix = lerp(0.30, 0.55, RButton) + lerp(0.0, 0.10, KeyAlt); // exactly 0/1 for RButton, 0/1 binary
-        uvEntry = lerp(input.uv, rippleUv, rippleMix * 0.35);
+        float rippleMix = lerp(0.0, 0.22, RButton) + lerp(0.0, 0.08, KeyAlt);
+        uvEntry = lerp(input.uv, rippleUv, rippleMix);
     }
     const PomResult res = ParallaxOcclusion(uvEntry, input.Position.xy, geom, tbn[2], frame0.viewDirTS, frame0.lightDirTS);
     const float2 uvHit = res.uv;
@@ -1438,8 +1474,11 @@ PsOut PS(PsInput input)
     }
 
     // =========================================================================
-    // PASS 2 — TENSOR LIGHTING & VOLUMETRIC (FULLY COMPLEX)
-    // Reads ComplexField per λ from rt1-3, applies anisotropic Jones BRDF + volumetric phase screens in complex domain.
+    // PASS 2 — TRUE HOLOGRAPHIC DEPTH PROJECTION (Fresnel point-cloud CGH)
+    // Real CGH: object wave = Σ A·exp(jkr)/r from depthMap point cloud (HOLO_SAMPLES=24),
+    // reference = off-axis plane wave from Sun direction, hologram = |R+O|² with phase encoding.
+    // This yields depth-dependent Fresnel zone plates (true parallax), not a swirling wheel.
+    // HOLO_SCALE_M=0.08 gives Fresnel number ~a²/(λz) 2..15 — physical holographic regime.
     // =========================================================================
     if(PassNum == 2){
         ComplexField EinB = CF_UnpackRT(rtMap1.SampleLevel(sampleTypeLinear, input.uv, 0));
@@ -1451,97 +1490,37 @@ PsOut PS(PsInput input)
         float thicknessMicron = rtMap6.SampleLevel(sampleTypeLinear, input.uv, 0).x;
         float shadow = rtMap6.SampleLevel(sampleTypeLinear, input.uv, 0).y;
         float2 uvHit = rtMap5.SampleLevel(sampleTypeLinear, input.uv, 0).xy;
-        float3 albedo = rtMap8.SampleLevel(sampleTypeLinear, input.uv, 0).rgb;
-        // Jones still carried but re-derived from thickness for accuracy
         const float lambdaB=462.0, lambdaG=538.0, lambdaR=612.0;
-        // Microfacet tensor BRDF (real intensity) -> amplitude = sqrt(intensity)
-        float alpha = clamp(1.15 - log2(max(SpecularPower,1.0))*0.14, 0.045, 0.98);
-        float aniso = clamp(ParallaxScaleOMD*0.42 + HeightScale*0.018 + thicknessMicron*0.02, 0.0, 0.9);
-        float3 specI = AnisotropicSpecular(nTS, frame.viewDirTS, frame.lightDirTS, alpha, aniso) * SpecularIntensity;
-        float3 specA = sqrt(max(specI, 0));
-        // Fresnel via Jones from Pass1 thickness: recompute rs/rp for each λ to get true complex Fresnel (not |r|²)
-        float2 rsB2,rpB2, rsG2,rpG2, rsR2,rpR2;
-        ThinFilm_CharMatrix(1.0, n_ord, 1.52, thicknessMicron*1000.0, saturate(dot(nTS, frame.viewDirTS)), lambdaB, rsB2, rpB2);
-        ThinFilm_CharMatrix(1.0, n_ord, 1.52, thicknessMicron*1000.0, saturate(dot(nTS, frame.viewDirTS)), lambdaG, rsG2, rpG2);
-        ThinFilm_CharMatrix(1.0, (n_ord+n_ext)*0.5, 1.52, thicknessMicron*1000.0, saturate(dot(nTS, frame.viewDirTS)), lambdaR, rsR2, rpR2);
-        // Schlick blend as complex lerp towards FresnelJones
-        float3 fresS = float3(CAbs2(rsR2), CAbs2(rsG2), CAbs2(rsB2)); // not used directly, we use Jones
-        // Apply NdotL as amplitude (sqrt of Lambert) to field
-        float NdotL = saturate(dot(nTS, frame.lightDirTS));
-        float ampLambert = sqrt(max(NdotL * shadow * 0.92 + 0.06, 0));
-        // Complex BRDF application: E *= (ampLambert + ampSpec * JonesFresnel )
-        // Build Jones per λ: Jbrdf = diag( ampLambert + ampSpec*rs , ampLambert + ampSpec*rp ) (s/p)
-        JonesMat JbrdfB; JbrdfB.xx = CAdd(float2(ampLambert,0), CScale(rsB2, specA.b)); JbrdfB.yy = CAdd(float2(ampLambert,0), CScale(rpB2, specA.b)); JbrdfB.xy=JbrdfB.yx=float2(0,0);
-        JonesMat JbrdfG; JbrdfG.xx = CAdd(float2(ampLambert,0), CScale(rsG2, specA.g)); JbrdfG.yy = CAdd(float2(ampLambert,0), CScale(rpG2, specA.g)); JbrdfG.xy=JbrdfG.yx=float2(0,0);
-        JonesMat JbrdfR; JbrdfR.xx = CAdd(float2(ampLambert,0), CScale(rsR2, specA.r)); JbrdfR.yy = CAdd(float2(ampLambert,0), CScale(rpR2, specA.r)); JbrdfR.xy=JbrdfR.yx=float2(0,0);
-        // FresnelMix (0/1) blends towards Schlick-converted Jones (approx by lerp magnitude)
-        float fm = saturate(FresnelMix);
-        JbrdfB.xx = CAdd(CScale(JbrdfB.xx, 1.0-fm), CScale(CScale(float2(1,0), FresnelReflectance), fm*0.2));
-        JbrdfG.xx = CAdd(CScale(JbrdfG.xx, 1.0-fm), CScale(CScale(float2(1,0), FresnelReflectance), fm*0.2));
-        JbrdfR.xx = CAdd(CScale(JbrdfR.xx, 1.0-fm), CScale(CScale(float2(1,0), FresnelReflectance), fm*0.2));
-        // MaterialIndex modulates metallic (scale Ey)
-        float metal = saturate(MaterialIndex*0.03);
-        JbrdfB.yy = CScale(JbrdfB.yy, lerp(1.0, 1.12, metal)); JbrdfG.yy = CScale(JbrdfG.yy, lerp(1.0,1.12,metal)); JbrdfR.yy = CScale(JbrdfR.yy, lerp(1.0,1.12,metal));
-        ComplexField E1B = CF_MulJones(JbrdfB, EinB), E1G = CF_MulJones(JbrdfG, EinG), E1R = CF_MulJones(JbrdfR, EinR);
-
-        // Volumetric phase screens: aurora/caustics/worm as complex phasors exp(i k Δn L) * exp(-αL/2)
-        float auroraDens = FbmFused(input.uv*1.9 + timeJ*0.015, 4) * (0.35 + AURORA_INTENSITY*0.45 + thicknessMicron*0.08);
-        float aurPhaseB = TWO_PI * auroraDens * 11.0 / lambdaB * (1.0+TanhFactorB*0.12);
-        float aurPhaseG = TWO_PI * auroraDens * 11.0 / lambdaG * (1.0+TanhFactorG*0.12);
-        float aurPhaseR = TWO_PI * auroraDens * 11.0 / lambdaR * (1.0+TanhFactorR*0.12);
-        // HeightParam / LookAt / CosineFactor already inside aurora density via FBM warp and colour, add as phase
-        aurPhaseB += CosineFactorB*0.08 + LookAtDeltaX*0.05; aurPhaseG += CosineFactorG*0.08; aurPhaseR += CosineFactorR*0.08;
-        float aurAtt = exp(-auroraDens*0.35*0.5) * lerp(1.0, 0.0, KeyShift); // KeyShift 0/1
-        E1B = CF_Scale(CF_MulPhase(E1B, aurPhaseB), aurAtt);
-        E1G = CF_Scale(CF_MulPhase(E1G, aurPhaseG), aurAtt);
-        E1R = CF_Scale(CF_MulPhase(E1R, aurPhaseR), aurAtt);
-
-        float caustDens = CausticsFused(input.uv, timeJ) * (0.6 + HeightScale*0.04);
-        float caustPhaseB = TWO_PI * caustDens * 6.0 / lambdaB, caustPhaseG = TWO_PI * caustDens * 6.0 / lambdaG, caustPhaseR = TWO_PI * caustDens * 6.0 / lambdaR;
-        float caustAtt = exp(-caustDens*0.22*0.5);
-        E1B = CF_Scale(CF_MulPhase(E1B, caustPhaseB), caustAtt);
-        E1G = CF_Scale(CF_MulPhase(E1G, caustPhaseG), caustAtt);
-        E1R = CF_Scale(CF_MulPhase(E1R, caustPhaseR), caustAtt);
-
-        // Worm tunnel as retarder + scatter (KeyAlt or RButton==1)
-        if(KeyAlt > 0.5 || RButton==1){
-            float3 wormCol = WormTunnelFused(input.uv, timeJ);
-            float wormL = dot(wormCol, LUMA_709);
-            float wormPhase = wormL * TWO_PI * 0.7 * lerp(0.6,1.0, Mix3); // retardance ∝ Mix3
-            float wormAtt = exp(-wormL*0.18);
-            E1B = CF_Scale(CF_MulPhase(E1B, wormPhase* (550.0/lambdaB)), wormAtt);
-            E1G = CF_Scale(CF_MulPhase(E1G, wormPhase* (550.0/lambdaG)), wormAtt);
-            E1R = CF_Scale(CF_MulPhase(E1R, wormPhase* (550.0/lambdaR)), wormAtt);
-        }
-
-        // Glitter as random phase speckle (Worley + Perlin + Hash)
-        float glitter = WorleyFused(uvHit * (7.0 + GLITTER_DENSITY*1.4) + timeJ*0.018, 0.92);
-        float sparkle = step(0.87, glitter) * pow(saturate(glitter), 22.0) * (0.7 + HeightScale*0.22);
-        if(sparkle > 1e-4){
-            float rnd = Hash21(input.uv*512.0 + timeJ)*6.2831853; // random phase 0..2π
-            float sparkAmp = sqrt(sparkle*1.4 * lerp(0.6,1.0, LButton));
-            // glitter adds coherent phasor: E += E * sparkAmp * exp(i rnd) * rainbowPhase
-            float3 sparkColPhase = float3(CosineFactorR, CosineFactorG, CosineFactorB)*0.18 + Perlin2Fused(uvHit*3.2+timeJ*0.009)*0.6;
-            ComplexField sparkB = CF_Scale(CF_MulPhase(E1B, rnd + sparkColPhase.b), sparkAmp);
-            ComplexField sparkG = CF_Scale(CF_MulPhase(E1G, rnd + sparkColPhase.g), sparkAmp);
-            ComplexField sparkR = CF_Scale(CF_MulPhase(E1R, rnd + sparkColPhase.r), sparkAmp);
-            E1B = CF_Add(E1B, sparkB); E1G = CF_Add(E1G, sparkG); E1R = CF_Add(E1R, sparkR);
-        }
-
-        // Mix2 as complex white balance (amplitude scale per λ, not just intensity lerp)
-        float wb = 1.0 + Mix2*0.45; float vib = Mix3*0.42;
-        float scB = lerp(1.0, wb, 0.82 + vib*0.15), scG = lerp(1.0, wb, 0.96), scR = lerp(1.0, wb, 1.08);
-        E1B = CF_Scale(E1B, scB); E1G = CF_Scale(E1G, scG); E1R = CF_Scale(E1R, scR);
-
-        // Store complex fields for Pass3 (preserve phase!)
-        output.rt1 = CF_PackRT(E1B);
-        output.rt2 = CF_PackRT(E1G);
-        output.rt3 = CF_PackRT(E1R);
+        float3 refDirBase = SafeNormalize(float3(SunX, SunY, SunZ*0.45 + 0.55));
+        float3 refDir = normalize(lerp(refDirBase, SafeNormalize(float3(SunX+0.18, SunY-0.12, SunZ)), LButton*0.28));
+        ComplexField ObjB = HolographicObjectField_PointCloud(input.uv, posHitW, geom, lambdaB, timeJ, frame.viewDirTS);
+        ComplexField ObjG = HolographicObjectField_PointCloud(input.uv, posHitW, geom, lambdaG, timeJ, frame.viewDirTS);
+        ComplexField ObjR = HolographicObjectField_PointCloud(input.uv, posHitW, geom, lambdaR, timeJ, frame.viewDirTS);
+        ComplexField RefB = HolographicReferenceField(posHitW, lambdaB, refDir);
+        ComplexField RefG = HolographicReferenceField(posHitW, lambdaG, refDir);
+        ComplexField RefR = HolographicReferenceField(posHitW, lambdaR, refDir);
+        ComplexField SumB = CF_Add(RefB, ObjB), SumG = CF_Add(RefG, ObjG), SumR = CF_Add(RefR, ObjR);
+        float HB = saturate(CF_Intensity(SumB) * 0.22);
+        float HG = saturate(CF_Intensity(SumG) * 0.22);
+        float HR = saturate(CF_Intensity(SumR) * 0.22);
+        float gamma = lerp(0.85, 1.18, HeightParamC*0.5 + (TanhFactorR+TanhFactorG+TanhFactorB)/3.0*0.1);
+        HB = pow(HB, gamma); HG = pow(HG, gamma); HR = pow(HR, gamma);
+        float mixH = saturate(ParallaxFactorB*0.88 + 0.12 + shadow*0.02);
+        ComplexField EoutB = CF_Add(CF_Scale(EinB, 1.0-mixH), CF_Scale(CF_MulPhase(EinB, HB*PI), mixH));
+        ComplexField EoutG = CF_Add(CF_Scale(EinG, 1.0-mixH), CF_Scale(CF_MulPhase(EinG, HG*PI), mixH));
+        ComplexField EoutR = CF_Add(CF_Scale(EinR, 1.0-mixH), CF_Scale(CF_MulPhase(EinR, HR*PI), mixH));
+        float attVol = exp(-thicknessMicron*0.055);
+        EoutB = CF_Scale(EoutB, attVol); EoutG = CF_Scale(EoutG, attVol); EoutR = CF_Scale(EoutR, attVol);
+        float wb = 1.0 + Mix2*0.22;
+        EoutB = CF_Scale(EoutB, lerp(1.0,wb,0.82)); EoutG = CF_Scale(EoutG, lerp(1.0,wb,0.96)); EoutR = CF_Scale(EoutR, lerp(1.0,wb,1.06));
+        output.rt1 = CF_PackRT(EoutB);
+        output.rt2 = CF_PackRT(EoutG);
+        output.rt3 = CF_PackRT(EoutR);
         output.rt4 = float4(normEnc, hitDepth);
-        output.rt5 = float4(uvHit, auroraDens, caustDens);
-        output.rt6 = float4(thicknessMicron, shadow, hitDepth, 1.0);
-        output.rt7 = float4(auroraDens, caustDens, dot(E1B.Ex, E1B.Ey), 1.0); // diagnostic: correlation
-        output.rt8 = float4(albedo, ShaderAlpha);
+        output.rt5 = float4(HB, HG, HR, 1.0);
+        output.rt6 = float4(thicknessMicron, shadow, dot(nTS, frame.viewDirTS), 1.0);
+        output.rt7 = float4(uvHit, refDir.x, refDir.y);
+        output.rt8 = float4(CF_Intensity(ObjB), CF_Intensity(ObjG), CF_Intensity(ObjR), ShaderAlpha);
         clip(res.edge);
         clip(frame0.viewDirTS.z + VIEW_BACKFACE_TOLERANCE);
         return output;
