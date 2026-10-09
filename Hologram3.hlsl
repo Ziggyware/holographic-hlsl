@@ -1,0 +1,919 @@
+﻿// Content of Hologram3_010.hlsl
+
+// Host layout: order and size are fixed; unused members are kept so offsets do not move.
+cbuffer ConstantBuffer : register(b0)
+{
+    float SunX;
+    float SunY;
+    float SunZ;
+    float ViewX;
+    float ViewY;
+    float ViewZ;
+    float ParallaxFactorA;
+    float ParallaxFactorB;
+    float ParallaxFactorC;
+    float HeightParamA;
+    float HeightParamB;
+    float HeightParamC;
+    float PhaseOffsetR;
+    float PhaseOffsetG;
+    float PhaseOffsetB;
+    float LookAtX;
+    float CosineFactorR;
+    float CosineFactorG;
+    float CosineFactorB;
+    float LookAtY;
+    float TanhFactorR;
+    float TanhFactorG;
+    float TanhFactorB;
+    float LookAtDeltaX;
+    float LookAtDeltaY;
+    float NumPasses;
+    float TotalTime;
+    float DepthScale;
+    float FresnelPower;
+    float FresnelReflectance;
+    float AnimateSpeed;
+    float ShaderAlpha;
+    float FresnelMix;
+    float KeyControl;
+    float KeyShift;
+    float KeyAlt;
+    float LButton;
+    float RButton;
+    float PassNum;
+    float SpecularPower;
+    float SpecularIntensity;
+    float NormalRadius;
+    float HeightScale;
+    float MaterialIndex;
+    float ParallaxScale;
+    float ParallaxScaleOMD;
+    float f1;
+    float f2;
+    float f3;
+    float f4;
+    float f5;
+    float f6;
+    float f7;
+    float f8;
+    float f9;
+    float f10;
+    float f11;
+    float f12;
+    float Gamma;
+    float KeyQDown;
+    float KeyWDown;
+    float KeyEDown;
+    float Mix2;
+    float Mix3;
+};
+// Conventions
+//   Types and functions PascalCase; locals and parameters camelCase; constants UPPER_SNAKE with unit suffix.
+//   Space suffix: W world [plate units, long side = 1]; TS tangent; N hologram-normalised; Uv texture coordinates; Px texels.
+//   Digit 0 = entry point before parallax occlusion; no digit = parallax-occlusion hit. depth01: 0 = top plane, 1 = full relief.
+//   Location: translated and rotated. Direction: rotated only.
+// Host ABI, unchanged: entry PS, ConstantBuffer layout, resource names and registers, PS input semantics, SV_Target0-7.
+//
+// Revision 011 (from 010). Switches below default to the corrected behaviour; set to 1 to compare against 010 where noted.
+//   1. W->TS used mul(dirW, tbn) (= TS->W). Now mul(tbn, dirW).
+//   2. One unit system: plate long side = 1. Eye/sun height, relief depth and the march share it (010 mixed m, m^0.5 and uv).
+//   3. Entry point is on the top plane (depth01 = 0), not on the relief under the pixel.
+//   4. Frame tilt = shortest-arc rotation toward the centre->eye direction (capped), not Euler angles of a metre value.
+//   5. Per-axis parallax/normal scale (non-square plates), shared by march, normals, AO and shadow.
+//   6. Thin film: 12 samples uniform in wavenumber over 400-700 nm, pixel-footprint coherence (sinc) instead of 8 samples over 250-900 nm.
+//   7. DOE: order -> wavelength inversion + 5-node Gauss-Hermite quadrature, footprint-prefiltered lobes, selectable groove profile.
+//   8. Compositing: no albedo^2, no cos(view) on radiance, DOE added as light (shadow-gated); gamut compression preserves luminance.
+
+static const float PI = 3.14159265359;
+static const float TWO_PI = 2.0 * PI;
+static const float EPSILON = 1e-10;
+
+// ---- switches -----------------------------------------------------------------------------------------------------
+#define POM_CLIP_EDGES          1
+#define POM_DEPTH_IS_HEIGHT     1   // 1 if depthMap stores height (1 = high = near)
+#define DOE_PROFILE             3   // groove profile: 0 sinusoidal (Bessel), 1 blazed (sinc^2), 2 binary 50 % duty
+#define DOE_GROOVE_MAP          1   // 1: groove depth = DOE_GROOVE_NM * gratingDepth1(uvHit); needs t2 bound to a groove-depth map
+#define OUTPUT_ENCODE_LAST_PASS 1   // 1: luminance tonemap + 1/Gamma on the last pass only; leave 0 if the host encodes
+
+static const float3 FILM_WHITE_RGB = float3(1.2048, 0.9484, 0.9087); // XYZ(1,1,1) in linear sRGB; kept for reference
+static const float FILM_MIN_NM = 250.0; // film thickness at depth01 = 0
+static const float FILM_MAX_NM = 900.0; // film thickness at depth01 = 1
+static const float FILM_LAMBDA_MIN_NM = 400.0; // spectral sampling range (visible)
+static const float FILM_LAMBDA_MAX_NM = 700.0;
+static const float FILM_N = 1.45;
+static const int FILM_SAMPLES = 12; // uniform in wavenumber; alias-free for OPD below ~ 1 / (bin width) = 11 um
+static const float FILM_VISIBILITY = 0.5; // two-beam fringe visibility before footprint averaging
+static const float FILM_STRENGTH = 0.15;
+
+static const float TBN_MAX_TILT_RAD = 1.0471976; // 60 deg
+static const float STEER_FACING = 0.5; // 0 = frame fixed to the plate, 1 = frame normal follows centre->eye up to the cap
+
+static const float PS_SHADOW_DARKEN_MAX = 0.5;
+
+static const float FRINGE_VISIBILITY = 0.6;
+
+static const float POM_ABSORB = 0.55;
+static const float POM_MIN_COS = 0.5;
+static const float POM_TRANS_FLOOR = 0.025;
+static const float POM_AO_MIN = 0.94;
+static const float POM_SHADOW_FLOOR = 0.2;
+static const int POM_MAX_STEPS = 8;
+static const int POM_MIN_STEPS = 2;
+static const int POM_REFINE_ITERS = 15; // Illinois false-position iterations
+static const uint POM_SHADOW_STEPS = 12;
+static const int POM_AO_DIRS = 18;
+static const int POM_AO_RADII = 3;
+static const float POM_AO_TEXELS = 4.0;
+static const float POM_AO_STRENGTH = 1.0;
+static const float POM_SHADOW_SMIN = 0.15; // retune POM_SHADOW_SOFTNESS after this
+static const float POM_SHADOW_BIAS = 0.01; // depth01
+static const float POM_SHADOW_SOFTNESS = 4.0; // 1/softness = occlusion ratio for full shadow
+static const float POM_LOD_FADE_START = 1.0; // mip at which parallax starts fading
+static const float POM_LOD_FADE_END = 5.0; // mip at which parallax is gone
+
+static const float DOE_SOURCE_K = 6500.0;
+static const int DOE_Y_SAMPLES = 24;
+static const float DOE_LAMBDA_MIN_NM = 380.0;
+static const float DOE_LAMBDA_MAX_NM = 780.0;
+static const float DOE_FLAT_BIAS = 0.02; // groove direction on a flat region: +x (as 010); smooth blend, no atan2 branch
+static const float DOE_PHASE_MAX_RAD = 8.0;
+static const float DOE_ALBEDO_TINT = 1.0; // 1: diffracted light is multiplied by the surface albedo (metallised foil)
+
+
+static const float STEER_ORBIT_RADIUS_N = 0.25; // [N units]
+static const float STEER_ORBIT_RATE_RAD_S = 0.5; // [rad/s]
+static const float VIEW_BACKFACE_TOLERANCE = 0.02; // [dimensionless] added to TS view z before clip
+static const float3 NORMAL_FLAT_TS = float3(0.0, 0.0, 1.0);
+static const float3 LUMA_709 = float3(0.2126, 0.7152, 0.0722);
+
+static const float3x3 XYZ_TO_LINEAR_RGB = float3x3(3.2406, -1.5372, -0.4986,
+                                                   -0.9689, 1.8758, 0.0415,
+                                                   0.0557, -0.2040, 1.0570);
+
+// Gauss-Hermite nodes/weights for the standard normal (probabilists'), n = 5: sum w = 1, sum w x^2 = 1, sum w x^4 = 3.
+static const float GH_X[5] = { -2.8569700138728056, -1.3556261799742659, 0.0, 1.3556261799742659, 2.8569700138728056 };
+static const float GH_W[5] = { 0.011257411327720691, 0.2220759220056126, 0.5333333333333333, 0.2220759220056126, 0.011257411327720691 };
+
+// Tunables driven by the cbuffer.
+static const float ANIM_TIME_S = TotalTime * AnimateSpeed;
+static const float DOE_PERIOD_UM = f2;
+static const float DOE_GAIN = f3;
+static const float DOE_SIGMA = f4 * cos(ANIM_TIME_S);
+static const float DOE_SWIRL = f5;
+static const float DOE_CHIRP = f8;
+static const float DOE_GROOVE_NM = f10;
+
+Texture2D<float4> diffuseMap : register(t0);
+Texture2D<float> depthMap : register(t1);
+Texture2D<float> gratingDepth1 : register(t2);
+Texture2D<float4> rtMap1 : register(t25);
+Texture2D<float4> rtMap2 : register(t26);
+Texture2D<float4> rtMap3 : register(t27);
+Texture2D<float4> rtMap4 : register(t28);
+Texture2D<float4> rtMap5 : register(t29);
+Texture2D<float4> rtMap6 : register(t30);
+Texture2D<float4> rtMap7 : register(t31);
+Texture2D<float4> rtMap8 : register(t32);
+
+SamplerState sampleTypeLinear : register(s0);
+SamplerState sampleTypeMirror : register(s1);
+
+struct PsInput
+{
+    float4 Position : SV_Position;
+    float2 uv : UV0;
+    float3 ViewDir : UV1;
+    float4 Color : COLOR0;
+};
+
+struct PsOut
+{
+    float4 rt1 : SV_Target0;
+    float4 rt2 : SV_Target1;
+    float4 rt3 : SV_Target2;
+    float4 rt4 : SV_Target3;
+    float4 rt5 : SV_Target4;
+    float4 rt6 : SV_Target5;
+    float4 rt7 : SV_Target6;
+    float4 rt8 : SV_Target7;
+};
+
+// One consistent unit system. sizeM: plate extent, long side = 1. depthM: relief depth at depth01 = 1, same unit.
+// parallaxUv = depthM / sizeM per axis: uv shift of a vertical ray that descends the full relief (DepthScale for a square plate).
+struct PlateGeom
+{
+    float2 sizeM;
+    float depthM;
+    float2 parallaxUv;
+};
+
+struct PomResult
+{
+    float4 color;
+    float3 albedo;
+    float2 uv;
+    float3 normalTS;
+    float shadow;
+    float hitDepth;
+    float fade;
+    float edge; // < 0: ray left the plate (clipped by the caller after all derivatives are taken)
+    float3 probe;
+};
+
+struct ViewLightFrame
+{
+    float3 viewDirTS;
+    float3 lightDirTS;
+    float3 normalTS;
+    float3 halfTS;
+};
+
+float3 SafeNormalize(float3 v)
+{
+    const float len = length(v);
+    return (len > EPSILON) ? v / len : float3(0.0, 0.0, 0.0);
+}
+
+float Sinc(float x)
+{
+    const float px = PI * x;
+    return (abs(px) < 1e-4) ? 1.0 : sin(px) / px;
+}
+
+float2 TextureSizePx(Texture2D<float> tex)
+{
+    uint2 size;
+    tex.GetDimensions(size.x, size.y);
+    return float2(size);
+}
+
+float2 TextureSizePx(Texture2D<float4> tex)
+{
+    uint2 size;
+    tex.GetDimensions(size.x, size.y);
+    return float2(size);
+}
+
+float2 TexelSizeUv(Texture2D<float4> tex)
+{
+    return float2(1.0, 1.0) / TextureSizePx(tex);
+}
+
+// Plate long side = 1 so every direction is independent of the absolute scale. HeightScale cancels and is not read.
+PlateGeom MakePlateGeom()
+{
+    const float2 texPx = max(TextureSizePx(depthMap), float2(1.0, 1.0));
+    const float maxPx = max(texPx.x, texPx.y);
+    PlateGeom geom;
+    geom.sizeM = texPx / maxPx;
+    geom.depthM = max(DepthScale, 0.0);
+    geom.parallaxUv = geom.depthM / geom.sizeM;
+    return geom;
+}
+
+// Rows are T, B, N: the frame is the shortest-arc rotation R that takes +z to the centre->steer direction, capped at
+// TBN_MAX_TILT_RAD and scaled by STEER_FACING. T = R x, B = R y, N = R z. No twist about N, no Euler order dependence.
+float3x3 ViewFacingTbn(float3 centreToSteerW)
+{
+    const float3 dir = SafeNormalize(centreToSteerW);
+    const float rho = length(dir.xy);
+    const float2 axis = (rho > 1e-6) ? float2(-dir.y, dir.x) / rho : float2(0.0, 0.0);
+    const float theta = min(acos(clamp(dir.z, -1.0, 1.0)), TBN_MAX_TILT_RAD) * STEER_FACING;
+    float s, c;
+    sincos(theta, s, c);
+    const float k = 1.0 - c;
+    const float3 tangent = float3(c + axis.x * axis.x * k, axis.x * axis.y * k, -axis.y * s);
+    const float3 bitangent = float3(axis.x * axis.y * k, c + axis.y * axis.y * k, axis.x * s);
+    const float3 normal = float3(axis.y * s, -axis.x * s, c);
+    return float3x3(tangent, bitangent, normal);
+}
+
+// N location -> W location. Location: the -0.5 centring is a translation; z is in plate units (eye height in plate lengths).
+float3 NormalizedToWorld(float3 n, float2 sizeM)
+{
+    return float3((n.xy - 0.5) * sizeM, n.z);
+}
+
+// uv + depth01 -> W location. Location: directions are (target - point) and vary per pixel.
+float3 SurfacePosW(float2 uv, float depth01, float2 sizeM, float depthM)
+{
+    return float3((uv - 0.5) * sizeM, (1.0 - depth01) * depthM);
+}
+
+// Direction in, direction out. tbn rows are T,B,N, so mul(tbn, v) = (T.v, B.v, N.v) is W->TS. (010 used mul(v, tbn) = TS->W.)
+float3 WorldToTs(float3 dirW, float3x3 tbn)
+{
+    return SafeNormalize(mul(tbn, dirW));
+}
+
+// Three W locations: a direction to a point is a difference of points in one frame. Subtract in W, then rotate.
+ViewLightFrame BuildViewLightFrame(float3 posW, float3 eyePosW, float3 sunPosW, float3x3 tbn)
+{
+    ViewLightFrame frame;
+    frame.viewDirTS = WorldToTs(eyePosW - posW, tbn);
+    frame.lightDirTS = WorldToTs(sunPosW - posW, tbn);
+    frame.normalTS = mul(tbn, float3(0.0, 0.0, 1.0));
+    frame.halfTS = SafeNormalize(frame.viewDirTS + frame.lightDirTS);
+    return frame;
+}
+
+float3 XyzToLinearRgb(float3 xyz)
+{
+    return mul(XYZ_TO_LINEAR_RGB, xyz);
+}
+
+// Spectral colours lie outside sRGB (negative channels). Move toward the equal-luminance grey until the minimum is 0.
+float3 GamutCompress(float3 rgb)
+{
+    const float luma = dot(rgb, LUMA_709);
+    const float minC = min(rgb.r, min(rgb.g, rgb.b));
+    if (minC >= 0.0)
+        return saturate(rgb);
+    if (luma <= 0.0)
+        return float3(1.0, 0.0, 0.0);
+    const float s = luma / (luma - minC);
+    return luma + (rgb - luma) * s;
+}
+
+// Luminance-only extended Reinhard (hue-preserving), then 1/Gamma.
+float3 EncodeDisplay(float3 rgb)
+{
+    const float whiteLuma = 4.0;
+    const float luma = max(dot(rgb, LUMA_709), 1e-6);
+    const float mapped = luma * (1.0 + luma / (whiteLuma * whiteLuma)) / (1.0 + luma);
+    const float g = (Gamma > 0.1) ? Gamma : 2.2;
+    return pow(saturate(rgb * (mapped / luma)), 1.0 / g);
+}
+
+bool IsLastPass()
+{
+    return PassNum +1.>= NumPasses - 0.01;
+}
+
+float CieLobe(float lambdaNm, float mu, float sigmaLow, float sigmaHigh)
+{
+    const float t = (lambdaNm - mu) / ((lambdaNm < mu) ? sigmaLow : sigmaHigh);
+    return clamp(saturate(exp(-0.5 * t * t)), 1e-7, 1.0);
+}
+
+// Wyman-Sloan-Shirley multi-lobe fit of the CIE 1931 2-degree observer.
+float CieXBar(float lambdaNm)
+{
+    lambdaNm = clamp(lambdaNm, 1.0, 1000.0);
+    return 1.056 * CieLobe(lambdaNm, 599.8, 37.9, 31.0)
+         + 0.362 * CieLobe(lambdaNm, 442.0, 16.0, 26.7)
+         - 0.065 * CieLobe(lambdaNm, 501.1, 20.4, 26.2);
+}
+
+float CieYBar(float lambdaNm)
+{
+    lambdaNm = clamp(lambdaNm, 1.0, 1000.0);
+    return 0.821 * CieLobe(lambdaNm, 568.8, 46.9, 40.5)
+         + 0.286 * CieLobe(lambdaNm, 530.9, 16.3, 31.1);
+}
+
+float CieZBar(float lambdaNm)
+{
+    lambdaNm = clamp(lambdaNm, 1.0, 1000.0);
+    return 1.217 * CieLobe(lambdaNm, 437.0, 11.8, 36.0)
+         + 0.681 * CieLobe(lambdaNm, 459.0, 26.0, 13.8);
+}
+
+float3 CieXyz(float lambdaNm)
+{
+    return float3(CieXBar(lambdaNm), CieYBar(lambdaNm), CieZBar(lambdaNm));
+}
+
+float3 RainbowColor(float phase01)
+{
+    float3 color;
+    color.r = sin(TWO_PI * phase01 + 0.0) * 0.5 + 0.5;
+    color.g = sin(TWO_PI * phase01 + 2.0 / 3.0 * PI) * 0.5 + 0.5;
+    color.b = sin(TWO_PI * phase01 + 4.0 / 3.0 * PI) * 0.5 + 0.5;
+    return color;
+}
+
+float LodFade(float lod)
+{
+    return saturate((POM_LOD_FADE_END - lod) / (POM_LOD_FADE_END - POM_LOD_FADE_START));
+}
+
+// depth01 at uv: 1 - sampled value, clamped away from 0 and 1, faded to 0 by mip level. Debug and groove-map use only.
+float DepthRaw(Texture2D<float> tex, float2 uv)
+{
+    const float depth01 =
+#if POM_DEPTH_IS_HEIGHT
+        1.0 -
+#endif
+        clamp(tex.SampleLevel(sampleTypeMirror, uv, 0), 1e-3, 1.0 - 1e-3);
+
+    const float lod = tex.CalculateLevelOfDetail(sampleTypeLinear, uv);
+    return depth01 * LodFade(lod);
+}
+
+float4 PrevPass(Texture2D<float4> tex, float2 uv)
+{
+    return float4(tex.SampleLevel(sampleTypeMirror, uv, 0.0).xyz, 1.0);
+}
+
+void InitPsOut(inout PsOut ret, float2 uv)
+{
+    if (PassNum == 0)
+    {
+        const float4 clear = float4(0.0, 0.0, 0.0, 1.0);
+        ret.rt1 = clear;
+        ret.rt2 = clear;
+        ret.rt3 = clear;
+        ret.rt4 = clear;
+        ret.rt5 = clear;
+        ret.rt6 = clear;
+        ret.rt7 = clear;
+        ret.rt8 = clear;
+    }
+    else
+    {
+        ret.rt1 = PrevPass(rtMap1, uv);
+        ret.rt2 = PrevPass(rtMap2, uv);
+        ret.rt3 = PrevPass(rtMap3, uv);
+        ret.rt4 = PrevPass(rtMap4, uv);
+        ret.rt5 = PrevPass(rtMap5, uv);
+        ret.rt6 = PrevPass(rtMap6, uv);
+        ret.rt7 = PrevPass(rtMap7, uv);
+        ret.rt8 = PrevPass(rtMap8, uv);
+    }
+}
+
+// uv only: 2-D image resample, no 3-D space. radiusTexels: red/blue offset along u. tintDir.z (dot with tintAxis) drives the tint phase.
+float3 ChromaticAberration(Texture2D<float4> tex, float2 uv, float radiusTexels, float3 tintDir, float3 tintAxis = float3(0.0, 0.0, 1.0), float hitDepth=0)
+{
+    const float2 texelUv = TexelSizeUv(tex);
+    const float3 tint = .5 + RainbowColor(cos(dot(tintDir, tintAxis) + ANIM_TIME_S));
+    const float r = tex.SampleLevel(sampleTypeMirror, uv + texelUv * float2(radiusTexels, 0.0) * depthMap.SampleLevel(sampleTypeLinear, uv * cos(ANIM_TIME_S) * hitDepth, 0) * HeightScale, 0).r * tint.r;
+    const float g = tex.SampleLevel(sampleTypeMirror, uv, 0).g * tint.g;
+    const float b = tex.SampleLevel(sampleTypeMirror, uv - texelUv * float2(radiusTexels, 0.0) * depthMap.SampleLevel(sampleTypeLinear, uv * sin(ANIM_TIME_S) * hitDepth, 0) * HeightScale, 0).b * tint.b;
+    return float3(r, g, b);
+}
+
+float PomIgn(float2 pixelPx)
+{
+    return frac(52.9829189 * frac(dot(pixelPx, float2(0.06711056, 0.00583715))));
+}
+
+float PomDepth(float2 uv, float2 uvDdx, float2 uvDdy)
+{
+    float depth01 = depthMap.SampleGrad(sampleTypeMirror, uv, uvDdx, uvDdy);
+#if POM_DEPTH_IS_HEIGHT
+    depth01 = 1.0 - depth01;
+#endif
+    return depth01;
+}
+
+// Horizon-style AO in plate units: height difference dh and lateral distance are both metric.
+float PomAo(float2 uvHit, float hitDepth, float depthMf, float2 sizeM, float jitter, float2 texelUv, float2 uvDdx, float2 uvDdy)
+{
+    float occlusion = 0.0;
+    [loop]
+    for (int a = 0; a < POM_AO_DIRS; ++a)
+    {
+        const float angleRad = (float(a) + jitter) * (TWO_PI / float(POM_AO_DIRS));
+        const float2 dir = float2(cos(angleRad), sin(angleRad));
+        float horizon = 0.0;
+        [loop]
+        for (int r = 1; r <= POM_AO_RADII; ++r)
+        {
+            const float2 offsetUv = dir * texelUv * (float(r) * POM_AO_TEXELS);
+            const float dh = (hitDepth - PomDepth(uvHit + offsetUv, uvDdx * 8.0, uvDdy * 8.0)) * depthMf;
+            const float2 offsetM = offsetUv * sizeM;
+            const float dist2 = dot(offsetM, offsetM);
+            horizon = max(horizon, (dh > 0.0) ? dh * dh / (dh * dh + dist2) : 0.0);
+        }
+        occlusion += horizon;
+    }
+    return 1.0 - saturate(POM_AO_STRENGTH * occlusion / float(POM_AO_DIRS));
+}
+
+// All vectors are TS directions: the heightfield march is a straight line in TS (z = depth, xy = uv shift).
+// No discard here: derivatives taken later in the shader stay defined in every quad lane; the caller clips on result.edge.
+PomResult ParallaxOcclusion(float2 uv0, float2 pixelPx, PlateGeom geom, float3 baseNormalTS, float3 viewDirTS, float3 lightDirTS)
+{
+    const float2 uvDdx = ddx(uv0);
+    const float2 uvDdy = ddy(uv0);
+
+    const float3 viewDir = normalize(viewDirTS);
+    const float3 lightDir = normalize(lightDirTS);
+    const float viewCos = max(viewDir.z, POM_MIN_COS);
+
+    const float lod = depthMap.CalculateLevelOfDetailUnclamped(sampleTypeLinear, uv0);
+    const float fade = LodFade(lod);
+    const float2 parallaxUv = geom.parallaxUv * fade;
+    const float depthMf = geom.depthM * fade;
+    const float2 rayUv = -viewDir.xy / viewCos * parallaxUv;
+
+    const float jitter = PomIgn(pixelPx);
+
+    const float2 texSizePx = TextureSizePx(depthMap);
+    const uint stepCount = (uint) clamp(ceil(length(rayUv * texSizePx)), (float) POM_MIN_STEPS, (float) POM_MAX_STEPS);
+    const float stepSize = rcp((float) stepCount);
+
+    float depthLo = 0.0, fLo = -PomDepth(uv0, uvDdx, uvDdy);
+    float depthHi = 1.0, fHi = 0.0;
+
+    [loop]
+    for (uint i = 0; i <= stepCount; ++i)
+    {
+        const float depth = saturate((i + 1.0 - jitter) * stepSize);
+        const float f = depth - PomDepth(uv0 + rayUv * depth, uvDdx, uvDdy);
+        if (f >= 0.0)
+        {
+            depthHi = depth;
+            fHi = f;
+            break;
+        }
+        depthLo = depth;
+        fLo = f;
+    }
+
+    int side = 0;
+    [loop]
+    for (int k = 0; k < POM_REFINE_ITERS; ++k)
+    {
+        const float depthMid = (depthLo * fHi - depthHi * fLo) / max(fHi - fLo, 1e-6);
+        const float fMid = depthMid - PomDepth(uv0 + rayUv * depthMid, uvDdx, uvDdy);
+
+        if (fMid >= 0.0)
+        {
+            depthHi = depthMid;
+            fHi = fMid;
+            if (side == 1)
+                fLo *= 0.5;
+            side = 1;
+        }
+        else
+        {
+            depthLo = depthMid;
+            fLo = fMid;
+            if (side == -1)
+                fHi *= 0.5;
+            side = -1;
+        }
+    }
+    const float hitDepth = depthHi;
+    const float2 uvHit = uv0 + rayUv * hitDepth;
+    float edge = 1.0;
+#if POM_CLIP_EDGES
+    if (any(uvHit < 0.0) || any(uvHit > 1.0))
+        edge = -1.0;
+#endif
+
+    const float tapSpread = 3.0;
+    const float2 tapUv = tapSpread * rcp(texSizePx);
+
+    const float tl = PomDepth(uvHit + tapUv * float2(-1, -1), uvDdx, uvDdy);
+    const float t = PomDepth(uvHit + tapUv * float2(0, -1), uvDdx, uvDdy);
+    const float tr = PomDepth(uvHit + tapUv * float2(1, -1), uvDdx, uvDdy);
+    const float l = PomDepth(uvHit + tapUv * float2(-1, 0), uvDdx, uvDdy);
+    const float r = PomDepth(uvHit + tapUv * float2(1, 0), uvDdx, uvDdy);
+    const float bl = PomDepth(uvHit + tapUv * float2(-1, 1), uvDdx, uvDdy);
+    const float b = PomDepth(uvHit + tapUv * float2(0, 1), uvDdx, uvDdy);
+    const float br = PomDepth(uvHit + tapUv * float2(1, 1), uvDdx, uvDdy);
+
+    // Scharr (3,10,3) derivative of depth01 per uv unit; times depthM / sizeM per axis = metric slope of the relief.
+    float2 grad = float2((3 * tr + 10 * r + 3 * br) - (3 * tl + 10 * l + 3 * bl),
+                         (3 * bl + 10 * b + 3 * br) - (3 * tl + 10 * t + 3 * tr)) / (32.0 * tapSpread);
+    grad *= texSizePx;
+
+    // depth01 grows downward, so the outward normal tilts toward +grad.
+    const float3 detailNormal = normalize(float3(grad * parallaxUv, 1.0));
+    const float3 baseNormal = normalize(baseNormalTS);
+    const float3 shadingNormal = normalize(float3(baseNormal.xy + detailNormal.xy, baseNormal.z * detailNormal.z));
+
+    const float ao = max(PomAo(uvHit, hitDepth, depthMf, geom.sizeM, jitter, rcp(texSizePx), uvDdx, uvDdy), POM_AO_MIN);
+
+    float shadow = 1.0;
+    float3 probe = float3(0.0, lightDir.z, 0.0);
+    if (lightDir.z <= 0.0)
+    {
+        shadow = 0.0;
+    }
+    else if (hitDepth > 1e-4)
+    {
+        const float2 lightUv = lightDir.xy / max(lightDir.z, 0.05) * parallaxUv;
+        float maxRatio = 0.0;
+        [loop]
+        for (uint j = 0; j < POM_SHADOW_STEPS; ++j)
+        {
+            const float s = hitDepth * (j + 1.0) / POM_SHADOW_STEPS;
+            const float depth = PomDepth(uvHit + lightUv * s, uvDdx * 4.0, uvDdy * 4.0);
+            const float overlap = (hitDepth - s) - depth - POM_SHADOW_BIAS;
+            maxRatio = max(maxRatio, overlap / (s + POM_SHADOW_SMIN));
+        }
+        probe = float3(maxRatio, lightDir.z, length(lightUv));
+        const float v = 1.0 - saturate(maxRatio * POM_SHADOW_SOFTNESS);
+        shadow = v * v * (3.0 - 2.0 * v);
+        shadow *= smoothstep(0.0, 0.1, lightDir.z);
+    }
+
+    const float3 halfDir = normalize(lightDir + viewDir);
+    const float nDotV = saturate(dot(shadingNormal, viewDir));
+    const float nDotL = saturate(dot(shadingNormal, lightDir));
+    const float spec = pow(saturate(dot(shadingNormal, halfDir)), 64.0) * nDotL;
+
+    const float transmittance = max(exp(-POM_ABSORB * hitDepth * (1.0 / max(lightDir.z, POM_MIN_COS) + 1.0 / viewCos)), POM_TRANS_FLOOR);
+
+    const float3 albedo = diffuseMap.SampleGrad(sampleTypeLinear, uvHit, uvDdx, uvDdy).rgb;
+    const float shadowLit = lerp(POM_SHADOW_FLOOR, 1.0, shadow);
+    const float3 color = (albedo * (0.5 * nDotV + 0.08) * ao + albedo * nDotL * shadowLit + spec * shadow * 0.25) * transmittance;
+
+    PomResult result;
+    result.color = float4(color, 1.0);
+    result.albedo = albedo;
+    result.uv = uvHit;
+    result.normalTS = shadingNormal;
+    result.shadow = shadow;
+    result.hitDepth = hitDepth;
+    result.fade = fade;
+    result.edge = edge;
+    result.probe = probe;
+    return result;
+}
+
+// Two-beam film on a mirror: I = 1 - V cos(2 pi OPD / lambda + t). 12 samples uniform in wavenumber nu = 1/lambda over the
+// visible band, weighted by lambda^2 (d lambda = lambda^2 d nu). The pixel footprint spans dOpd in OPD, so each fringe is
+// attenuated by sinc(dOpd * nu): the box-filtered average of cos. Neutral reflectance maps to (1,1,1).
+float3 ThinFilmInterference(float3 baseColor, float depth01, float3 normalTS, float3 viewDirTS)
+{
+    const float cosI = saturate(dot(normalize(normalTS), normalize(viewDirTS)));
+    const float sinT = sqrt(max(1.0 - cosI * cosI, 0.0)) / FILM_N;
+    const float cosT = sqrt(max(1.0 - sinT * sinT, 0.0));
+    const float opdNm = 2.0 * FILM_N * lerp(FILM_MIN_NM, FILM_MAX_NM, saturate(depth01)) * cosT;
+    const float footprintOpdNm = abs(ddx(opdNm)) + abs(ddy(opdNm));
+
+    const float nuMin = 1.0 / FILM_LAMBDA_MAX_NM;
+    const float nuMax = 1.0 / FILM_LAMBDA_MIN_NM;
+    const float dNu = (nuMax - nuMin) / float(FILM_SAMPLES);
+
+    float3 xyz = float3(0.0, 0.0, 0.0);
+    float3 xyzWhite = float3(0.0, 0.0, 0.0);
+    [loop]
+    for (int i = 0; i < FILM_SAMPLES; ++i)
+    {
+        const float nu = nuMin + (float(i) + 0.5) * dNu;
+        const float lambdaNm = 1.0 / nu;
+        const float coherence = Sinc(footprintOpdNm * nu);
+        const float intensity = 1.0 - FILM_VISIBILITY * coherence * cos(TWO_PI * opdNm * nu + ANIM_TIME_S);
+        const float3 cmf = CieXyz(lambdaNm) * (lambdaNm * lambdaNm);
+        xyz += intensity * cmf;
+        xyzWhite += cmf;
+    }
+    const float3 rgb = clamp(XyzToLinearRgb(xyz) / max(XyzToLinearRgb(xyzWhite), float3(1e-4, 1e-4, 1e-4)), 0.0, 2.0);
+    return baseColor * max(lerp(float3(1.0, 1.0, 1.0), rgb, FILM_STRENGTH), 0.0);
+}
+
+float DoePlanck(float lambdaNm, float temperatureK)
+{
+    const float lambdaUm = clamp(lambdaNm * 1e-3, 1e-3, 100.0);
+    const float l2 = lambdaUm * lambdaUm;
+    return 1.0 / clamp(l2 * l2 * lambdaUm * (exp(1.4388e4 / (lambdaUm * temperatureK)) - 1.0), 1e-6, 1e6);
+}
+
+// Source spectrum relative to 560 nm. Y of the full source, integrated over the DOE band in nm: normalises radiance so a
+// perfect white diffractor (eta = 1 over the whole band) has Y = 1.
+float DoeSource(float lambdaNm)
+{
+    return DoePlanck(lambdaNm, DOE_SOURCE_K) / DoePlanck(560.0, DOE_SOURCE_K);
+}
+
+float DoeYWhite()
+{
+    const float stepNm = (DOE_LAMBDA_MAX_NM - DOE_LAMBDA_MIN_NM) / float(DOE_Y_SAMPLES);
+    float sum = 0.0;
+    [unroll]
+    for (int i = 0; i < DOE_Y_SAMPLES; ++i)
+    {
+        const float lambdaNm = DOE_LAMBDA_MIN_NM + (float(i) + 0.5) * stepNm;
+        sum += DoeSource(lambdaNm) * CieYBar(lambdaNm);
+    }
+    return sum * stepNm;
+}
+
+// Bessel J_m(x), power series to 10 terms, m! exact for m <= 3 (orders used: 1..3). Error < 1e-4 for x <= 8.
+float DoeBesselJ(int m, float x)
+{
+    const float h = 0.5 * x;
+    const float h2 = h * h;
+    float mFactorial = 1.0;
+    if (2 <= m)
+        mFactorial *= 2.0;
+    if (3 <= m)
+        mFactorial *= 3.0;
+    float term = pow(abs(h), float(m)) / mFactorial;
+    float sum = term;
+    [unroll]
+    for (int k = 1; k <= 10; ++k)
+    {
+        term *= -h2 / (float(k) * float(k + m));
+        sum += term;
+    }
+    return sum;
+}
+
+// Order efficiency of a reflective phase grating. p = peak-to-peak optical path difference in waves
+// = grooveNm (cos(theta_in) + cos(theta_out)) / lambda. signedOrder > 0: toward the +grating-vector side.
+//   sinusoidal: J_m(pi p)^2          (m and -m equal)
+//   blazed    : sinc(p - m)^2        (asymmetric; p = 1 puts all light in m = 1)
+//   binary    : 4 sin(pi p)^2 / (m pi)^2 for odd m, 0 for even m (50 % duty)
+float DoeEfficiency(float signedOrder, float p)
+{
+#if DOE_PROFILE == 1
+    const float s = Sinc(p - signedOrder);
+    return s * s;
+#elif DOE_PROFILE == 2
+    const float m = abs(signedOrder);
+    const float s = sin(PI * p);
+    return (frac(0.5 * m) < 0.25) ? 0.0 : 4.0 * s * s / (m * m * PI * PI);
+#else
+    const float j = DoeBesselJ((int) abs(signedOrder), min(PI * p, DOE_PHASE_MAX_RAD));
+    return j * j;
+#endif
+}
+
+float GrooveDepthNm(float2 uv)
+{
+#if DOE_GROOVE_MAP
+    return DOE_GROOVE_NM * (1.0+gratingDepth1.SampleLevel(sampleTypeMirror, uv, 0));
+#else
+    return DOE_GROOVE_NM;
+#endif
+}
+
+
+// Local-grating (geometrical-optics limit of a CGH / dot-matrix hologram) model. All vectors are TS directions.
+// Grating equation, transverse part in the local surface plane: V_t + L_t = m (lambda / Lambda) g, with g the grating
+// direction. For order m the wavelength that satisfies it is lambda_m = kAlong Lambda / m, so the order is a spectral
+// lobe centred there. Lobe width (in k) = max(DOE_SIGMA, pixel-footprint spread of k); the footprint term is the variance
+// of a box of width |ddx k| + |ddy k|, which keeps the mean energy and removes shimmer. The lobe is integrated over
+// wavelength with a 5-node Gauss-Hermite rule centred on lambda_m: no spectral aliasing, and orders whose lobe lies outside
+// the visible band cost nothing. Returns linear sRGB radiance relative to a white source (Y = 1), gamut-compressed.
+float3 DiffractiveRainbow(float2 uv, float3 normalTS, float3 viewDirTS, float3 lightDirTS, float depth01, float grooveNm)
+{
+    // Groove direction: slope direction, biased toward +x where the relief is flat (smooth; 010 used atan2 with a hard switch).
+    const float2 biased = normalTS.xy * float2(DOE_FLAT_BIAS, 0.0);
+    const float2 slopeDir = biased * rsqrt(max(dot(biased, biased), 1e-6));
+    float swirlSin=0, swirlCos=0;
+    sincos(DOE_SWIRL * TWO_PI * depth01, swirlSin, swirlCos);
+    const float2 dir2 = float2(swirlCos * slopeDir.x - swirlSin * slopeDir.y,
+                               swirlSin * slopeDir.x + swirlCos * slopeDir.y);
+
+    const float3 gratingDir3 = SafeNormalize(float3(dir2, gratingDepth1.SampleLevel(sampleTypeLinear, uv, 0)));
+    const float3 tangent = SafeNormalize(gratingDir3 - normalTS * dot(gratingDir3, normalTS));
+    const float3 bitangent = SafeNormalize(cross(normalTS, tangent));
+
+    const float3 sumDir = SafeNormalize(viewDirTS + lightDirTS);
+    const float sumAlong = dot(sumDir, tangent);
+    const float kAlong = abs(sumAlong);
+    const float orderSign = (sumAlong < 0.0) ? -1.0 : 1.0;
+    const float kAcross = dot(sumDir, bitangent);
+
+    const float footAlong = abs(ddx(kAlong)) + abs(ddy(kAlong));
+    const float footAcross = abs(ddx(kAcross)) + abs(ddy(kAcross));
+    const float sigma2 = DOE_SIGMA * DOE_SIGMA;
+    const float sigmaAlong = sqrt(sigma2 + footAlong * footAlong * (1.0 / 12.0));
+    const float sigmaAcross = sqrt(sigma2 + footAcross * footAcross * (1.0 / 12.0));
+    const float acrossAmp = (DOE_SIGMA / sigmaAcross) * exp(-0.5 * kAcross * kAcross / (sigmaAcross * sigmaAcross));
+
+    const float periodNm = clamp(max(1000.0 * DOE_PERIOD_UM * (1.0 + DOE_CHIRP * (depth01 - 0.5)), 200.0), 200.0, 1000.0);
+    const float cosSum = clamp(saturate(dot(normalTS, lightDirTS)) + saturate(dot(normalTS, viewDirTS)), 0.0, 2.0);
+
+    float3 xyz = float3(0.0, 0.0, 0.0);
+    [unroll]
+    for (int m = 1; m <= 3; ++m)
+    {
+        const float centreNm = kAlong * periodNm / float(m);
+        const float spreadNm = sigmaAlong * periodNm / float(m);
+        if (centreNm + 3.0 * spreadNm < DOE_LAMBDA_MIN_NM || centreNm - 3.0 * spreadNm > DOE_LAMBDA_MAX_NM)
+            continue;
+
+        // Integral of a lobe with peak (DOE_SIGMA / sigmaAlong) and std spreadNm: DOE_SIGMA * Lambda / m * sqrt(2 pi) * E[F].
+        float3 expectation = float3(0.0, 0.0, 0.0);
+        [unroll]
+        for (int j = 0; j < 5; ++j)
+        {
+            const float lambdaNm = max(centreNm + spreadNm * GH_X[j], 1.0);
+            const float p = grooveNm * cosSum / lambdaNm;
+            expectation += GH_W[j] * DoeSource(lambdaNm) * DoeEfficiency(orderSign * float(m), p) * CieXyz(lambdaNm);
+        }
+        xyz += expectation * (DOE_SIGMA * periodNm / float(m) * 2.5066283 * acrossAmp);
+    }
+
+    return GamutCompress(XyzToLinearRgb(xyz / max(DoeYWhite(), EPSILON)));
+}
+
+int DebugMode()
+{
+    return (KeyQDown > 0.5 ? 1 : 0) | (KeyWDown > 0.5 ? 2 : 0) | (KeyEDown > 0.5 ? 4 : 0);
+}
+
+PsOut PS(PsInput input)
+{
+    PsOut output;
+    InitPsOut(output, input.uv);
+
+    const PlateGeom geom = MakePlateGeom();
+
+    const float3 viewN = float3(ViewX, ViewY, ViewZ);
+    const float3 sunN = float3(SunX, SunY, SunZ);
+    const float2 orbitN = float2(cos(ANIM_TIME_S * STEER_ORBIT_RATE_RAD_S),
+                                 sin(ANIM_TIME_S * STEER_ORBIT_RATE_RAD_S)) * STEER_ORBIT_RADIUS_N;
+
+    // Locations in plate units. ViewZ / SunZ are heights in plate lengths (010: multiples of a relief depth, which put the eye
+    // closer to the plate than its own size and made every direction graze away from the point under the eye).
+    const float3 eyePosW = NormalizedToWorld(viewN, geom.sizeM);
+    const float3 sunPosW = NormalizedToWorld(sunN, geom.sizeM);
+    const float3 steerPosW = NormalizedToWorld(float3(viewN.xy + orbitN, viewN.z), geom.sizeM);
+
+    // W location; origin is the plane centre, so steerPosW is also the centre->steer direction that defines the frame.
+    const float3x3 tbn = ViewFacingTbn(steerPosW);
+
+    // The ray enters on the top plane (depth01 = 0): the march and the entry direction describe the same line.
+    const float3 pos0W = SurfacePosW(input.uv, 0.0, geom.sizeM, geom.depthM);
+    const ViewLightFrame frame0 = BuildViewLightFrame(pos0W, eyePosW, sunPosW, tbn);
+
+    // TS directions: the march is a straight line in TS. Entry vectors: the ray enters at the unperturbed surface.
+    const PomResult res = ParallaxOcclusion(input.uv, input.Position.xy, geom, tbn[2], frame0.viewDirTS, frame0.lightDirTS);
+
+    // Rebuilt from the hit location: the light ray into the hit point differs from the entry light ray; the view ray is the same line.
+    const float2 uvHit = res.uv;
+    const float3 posHitW = SurfacePosW(uvHit, res.hitDepth * res.fade, geom.sizeM, geom.depthM);
+    const ViewLightFrame frame = BuildViewLightFrame(posHitW, eyePosW, sunPosW, tbn);
+    const float3 normalTS = res.normalTS;
+
+    // TS directions: film phase depends only on angles to the local normal.
+    const float3 film = ThinFilmInterference(res.color.rgb, res.hitDepth, normalTS, mul(frame.viewDirTS, tbn));
+
+    // TS directions: the grating equation projects onto the local surface.
+    const float3 doe = DiffractiveRainbow(input.uv, normalTS, frame.viewDirTS, frame.lightDirTS, res.hitDepth, GrooveDepthNm(uvHit));
+
+    const float shadowDarken = clamp(f12, 0.0, PS_SHADOW_DARKEN_MAX);
+
+    // body (already shadowed, AO'd, absorbed) x film, extra shadow darkening f12 as a fraction; diffracted light added,
+    // gated by the light's visibility. Radiance carries no view cosine: a grating conserves etendue, L_out = eta L_in.
+    const float3 filmLit = film * lerp(1.0 - shadowDarken, 1.0, res.shadow);
+    const float3 diffracted = doe * DOE_GAIN * res.shadow * lerp(float3(1.0, 1.0, 1.0), res.albedo, DOE_ALBEDO_TINT);
+    float3 lit = filmLit + diffracted;
+
+    float3 chroma = float3(0.0, 0.0, 0.0);
+    if (PassNum > 0)
+    {
+        // Passed as tintDir: only .z (dot with +z) drives the tint phase. NormalRadius is the red/blue offset in texels.
+        const float3 chromaTintDir = (abs(f11 * saturate(res.hitDepth)) * FRINGE_VISIBILITY).xxx;
+        chroma = ChromaticAberration(rtMap1, input.uv, NormalRadius, chromaTintDir, cross(normalTS, chromaTintDir), res.hitDepth) + lit;
+        
+    }
+    float3 outRgb = GamutCompress(lit);
+#if OUTPUT_ENCODE_LAST_PASS
+    if (IsLastPass())
+        outRgb = lerp( res.color.rgb, EncodeDisplay(outRgb), max(0, dot(frame.viewDirTS, normalTS)) * (cos(ANIM_TIME_S) * (res.hitDepth * .5 + .5)));
+#endif
+    output.rt1.xyz = outRgb;
+    
+    const int debugMode = DebugMode();
+    if (debugMode != 0)
+    {
+        float3 dbg;
+        switch (debugMode)
+        {
+            case 1:
+                dbg = res.hitDepth.xxx;
+                break;
+            case 2:
+                dbg = res.shadow.xxx;
+                break;
+            case 3:
+                dbg = 0.5 * normalTS + 0.5;
+                break;
+            case 4:
+                dbg = film;
+                break;
+            case 5:
+                dbg = KeyControl ? float3(1, 0, 0) * DepthRaw(gratingDepth1, uvHit)
+                             : float3(0, 0, 1) * DepthRaw(depthMap, uvHit);
+                break;
+            case 6:
+                dbg = KeyControl ? 1.0 - chroma : chroma;
+                break;
+            default:
+                dbg = float3(0, 1, 0);
+            //KeyControl ? doe * (KeyAlt ? DOE_GAIN : 1.0) : doe * DOE_GAIN;
+                break;
+        }
+        output.rt1.xyz = (KeyShift > 0.5) ? res.probe : dbg;
+    }
+
+    // Edge and back-face clips last: every ddx/ddy above saw all four quad lanes.
+    clip(res.edge);
+    clip(frame0.viewDirTS.z + VIEW_BACKFACE_TOLERANCE);
+
+    return output;
+}
+

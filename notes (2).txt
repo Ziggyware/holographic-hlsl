@@ -1,0 +1,52 @@
+// HLSL Shader Code for Advanced Fresnel Diffraction Effect Using Multiple Passes and Textures
+
+/*
+please make use of multiple passes and multiple textures and create an advanced fresnel diffraction effect that uses physics and advanced color effects.
+
+use PassNum and NumPasses to determine the pass. for example:
+
+(1+PassNum)/NumPasses returns 1 for first pass with one total passes, (1+PassNum)/NumPasses returns .5 for the first pass with two passes.
+
+You can use psout when returning from the pixel shader to write to the 8 render targets.
+
+psout ret = (psout)0;
+ret.rt1 = double4(1,0,0,1); // set red to render target 1
+if(PassNum == 0){
+    ret.rt1 = double4(0, 1, 0, 1); // set green to render target 1 on pass 1
+}
+if((1+PassNum) == NumPasses){
+   ret.rt1 = double4(0,0,1,1); // set to blue on the final pass
+}
+you can preserve values between passes by using rtMap1 thru rtMap8 like this:
+if(PassNum > 0){
+   ret.rt1 = rtMap2.SampleLevel(sampleTypeLinear, input.uv, 0); // set render target 1 to the previous render target 2 output.
+}
+
+There are multiple images available to the shader:
+
+diffuseMap : the diffuse color (the base image)
+depthMap : the depth map
+normalMap : the normal map
+gratingMap1 thru gratingMap4 : light grating maps for advanced lighting effects
+gratingDepth1 thru gratingDepth4 : light grating map depth maps
+gratingNormal1 thru gratingNormal4: the grating map normals for the grating maps
+gradientMap1 thru gradientMap4: gradient maps along the X axis used for advanced color gradient effects
+
+use f1 thru f12 to allow the user to adjust values in the effect. the user can adjust values for all values in the constant buffer
+
+use the render targets to create an advanced physics simulation that renders an amazing fresnel diffraction effect.
+
+
+use advanced physics and light interference along with precise interpolation for left and right eye to create an advanced effect that appears to protrude from the screen.
+
+for example (this is only an approximation of a calculation)
+
+var uv = lerp(double2(1,0) - config.uv, config.uv, interpolationValue); // the effect looks as tho it is rendered both from the right and left angles over time
+
+all variables should be used in the shader. please ensure all variables are accounted for and the values for f1 thru f12 are adjustable. use actual physics and advanced reasoning when determining the final shader output. use animated effects to show depth in the shader. ensure the effect appears holographic 3d. use advanced physics, calculus, microanalysis, dichroism, fresnel, aperature, interference, diffraction intensity, multi-pass rendering techniques that use previous pass data in each subsequent pass that store values such as direction, color, intensity, layer depth, use advanced reasoning and logic to ensure proper output.
+
+
+*/
+// Main pixel shader
+// HLSL Shader Code for Advanced Fresnel Diffraction Effect Using Multiple Passes and Textures
+

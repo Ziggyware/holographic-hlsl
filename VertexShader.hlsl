@@ -1,0 +1,172 @@
+﻿
+
+cbuffer ConstantBuffer : register(b0)
+{
+
+float SunX;
+		float SunY;
+		float SunZ;
+		float ViewX;      // Camera/view position (x, y, z)
+
+		float ViewY;
+		float ViewZ;
+		// Parallax Occlusion Mapping Parameters
+		float ParallaxFactorA;   // Factors for parallax mapping
+		float ParallaxFactorB;
+
+		float ParallaxFactorC;
+		float HeightParamA;      // Parameters for height calculations
+		float HeightParamB;
+		float HeightParamC;
+
+		// Phase Modulation Parameters
+		float PhaseOffsetR;      // Phase offsets for R, G, B channels
+		float PhaseOffsetG;
+		float PhaseOffsetB;
+		float LookAtX;
+
+		float CosineFactorR;     // Cosine factors for R, G, B channels
+		float CosineFactorG;
+		float CosineFactorB;
+		float LookAtY;
+
+		float TanhFactorR;       // Tanh factors for R, G, B channels
+		float TanhFactorG;
+		float TanhFactorB;
+		float LookAtDeltaX;
+
+		float LookAtDeltaY;
+		float NumPasses;
+		float TotalTime;
+		float DepthScale;
+
+		float FresnelPower;
+		float FresnelReflectance;
+		float AnimateSpeed;
+		float ShaderAlpha;
+
+		float FresnelMix;
+		float KeyControl;
+		float KeyShift;
+		float KeyAlt;
+
+		float LButton;
+		float RButton;
+		float PassNum;
+		float SpecularPower;
+
+		float SpecularIntensity;
+		float NormalRadius;
+		float HeightScale;
+		float MaterialIndex;
+
+		float ParallaxScale;
+		float ParallaxScaleOMD;
+		float f01;
+		float f02;
+
+		float f03;
+		float f04;
+		float f05;
+		float f06;
+
+		float f07;
+		float f08;
+		float f09;
+		float f10;
+
+		float f11;
+		float f12;
+		float Gamma;
+		float KeyQDown;
+
+		float KeyWDown;
+		float KeyEDown;
+		float Mix2;
+		float Mix3;
+
+
+};
+struct PS_INPUT
+{
+    float4 Position : SV_POSITION;
+    float2 TexCoord : TEXCOORD0;
+	float3 TexCoord2 : TEXCOORD1;
+	float4 Color     : COLOR0;
+};
+struct VS_INPUT
+{
+    float3 Position : POSITION;
+	float2 TexCoord : TEXCOORD0;
+};
+
+// Texture resources used by the shader.
+Texture2D<float4> diffuseMap : register(t0);
+Texture2D<float> depthMap : register(t1);
+Texture2D<float> gratingDepth1 : register(t2);
+Texture2D<float> gratingDepth2 : register(t3);
+Texture2D<float> gratingDepth3 : register(t4);
+Texture2D<float> gratingDepth4 : register(t5);
+Texture2D<float4> skylineMap : register(t6);
+Texture2D<float4> rainbowMap2 : register(t7);
+Texture2D<float4> gratingMap1 : register(t8);
+Texture2D<float4> gratingMap2 : register(t9);
+Texture2D<float4> gratingMap3 : register(t10);
+Texture2D<float4> gratingMap4 : register(t11);
+Texture2D<float3> gradient1 : register(t12);
+Texture2D<float3> gradient2 : register(t13);
+Texture2D<float3> gradient3 : register(t14);
+Texture2D<float3> gradient4 : register(t15);
+Texture2D<float3> noiseMap1 : register(t16);
+Texture2D<float3> noiseMap2 : register(t17);
+Texture2D<float3> noiseMap3 : register(t18);
+Texture2D<float3> noiseMap4 : register(t19);
+Texture2D<float3> normalMap : register(t20);
+Texture2D<float3> gratingNormal1 : register(t21);
+Texture2D<float3> gratingNormal2 : register(t22);
+Texture2D<float3> gratingNormal3 : register(t23);
+Texture2D<float3> gratingNormal4 : register(t24);
+Texture2D<float4> rtMap1 : register(t25);
+Texture2D<float4> rtMap2 : register(t26);
+Texture2D<float4> rtMap3 : register(t27);
+Texture2D<float4> rtMap4 : register(t28);
+Texture2D<float4> rtMap5 : register(t29);
+Texture2D<float4> rtMap6 : register(t30);
+Texture2D<float4> rtMap7 : register(t31);
+Texture2D<float4> rtMap8 : register(t32);
+Texture2D<float4> rtMap9 : register(t33);
+Texture2D<float4> rtMap10 : register(t34);
+Texture2D<float4> rtMap11 : register(t35);
+Texture2D<float4> rtMap12 : register(t36);
+Texture2D<float4> rtMap13 : register(t37);
+Texture2D<float4> rtMap14 : register(t38);
+Texture2D<float4> rtMap15 : register(t39);
+Texture2D<float4> rtMap16 : register(t40);
+Texture2D<float4> computeMap : register(t41);
+
+#define samplerState sampleTypeMirror
+// Sampler states for texture sampling.
+SamplerState sampleTypeLinear : register(s0);
+SamplerState sampleTypeMirror : register(s1);
+SamplerState sampleTypeClamp : register(s2);
+SamplerState sampleTypeCube : register(s3);
+SamplerState sampleTypePoint : register(s4);
+
+
+PS_INPUT VS(VS_INPUT input)
+{
+    PS_INPUT output;
+    float3 viewPos = float3(ViewX, ViewY, ViewZ);
+    float depth = depthMap.SampleLevel(sampleTypeMirror, input.TexCoord.xy, 0.0);
+    float3 pixel = float3(input.TexCoord.xy, depth);
+
+    // NDC position: UV [0,1] -> clip [-1,1], flip Y for D3D convention
+    float2 ndc = float2(input.TexCoord.x*2.0-1.0,1.0-input.TexCoord.y*2.0);
+    output.Position = float4(ndc,depth, 1);
+  
+    output.TexCoord = input.TexCoord;
+    float3 dir = normalize(viewPos - pixel);
+    output.TexCoord2 = normalize(saturate(dir * .5 + .5));
+    output.Color = float4(pixel, 1);
+    return output;
+}

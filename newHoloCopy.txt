@@ -1,0 +1,5598 @@
+﻿#define ViewportWidth 1024
+#define ViewportHeight 970
+#define PI 3.14159265358979
+#define MATH_E 2.71828
+#define timr (AnimateSpeed)
+#define OCCLUSION_MIN_DIFFERENCE 0.001
+
+#define vec2 float2 
+#define vec3 float3 
+#define vec4 float4
+#define ivec2 int2
+#define clamp011(x) clamp(x, epsilon, (1-epsilon))
+#define clamp012(x) clamp(x, vec2(epsilon, epsilon), vec2((1-epsilon), (1-epsilon)))
+#define clamp013(x) clamp(x, vec3(epsilon, epsilon, epsilon), vec3((1-epsilon), (1-epsilon), (1-epsilon)))
+#define clamp014(x) clamp(x, vec4(epsilon, epsilon, epsilon, epsilon), vec4((1-epsilon), (1-epsilon), (1-epsilon), (1-epsilon)))
+#define ENABLE_CHROM_ABERR epsilon
+#define ENABLE_RED_BLUE_DEPTH 0x0002
+#define ENABLE_CHROMATIC_ABERRATION 0x0004
+#define ENABLE_LIGHTING_CALCULATION 0x0008
+#define ENABLE_ROTATE_HUE 0x0010
+#define ENABLE_BLOOM 0x0020
+#define ENABLE_TRIP_BLUR 0x0040
+#define MATH_E 2.71828
+#define max2(x, y) vec2(max(x.x,y.x),max(x.y,y.y))
+#define max3(x, y) vec3(max(x.x,y.x),max(x.y,y.y),max(x.z,y.z))
+#define max4(a, b) vec4(max(a.x,b.x),max(a.y,b.y),max(a.z,b.z),max(a.w,b.w))
+#define max43(a) max(max(a.x, a.y), a.z)
+#define max44(a) max(max(max(a.x, a.y), a.z), a.w)
+#define max33(a) max(max(a.x, a.y), a.z)
+#define NUM_LAYERS 6
+#define tex2D mir2D
+
+
+SamplerState sampleTypeLinear : register(s0);
+SamplerState sampleTypeMirror2 : register(s1);
+SamplerState sampleTypeMirror : register(s2);
+
+
+static const float epsilon = 1e-6;
+inline float ClampEpsilon(float v)
+{
+    return saturate(clamp(v, epsilon, 1 - epsilon));
+}
+inline float2 ClampEpsilon(float2 v)
+{
+    return clamp(v, epsilon, 1 - epsilon);
+}
+inline float3 ClampEpsilon(float3 v)
+{
+    return clamp(v, epsilon, 1 - epsilon);
+}
+inline float4 ClampEpsilon(float4 v)
+{
+    return clamp(v, epsilon, 1 - epsilon);
+}
+inline float ClampEpsilon11(float v)
+{
+    return clamp(v, epsilon - 1, 1 - epsilon);
+}
+inline float2 ClampEpsilon11(float2 v)
+{
+    return clamp(v, epsilon - 1, 1 - epsilon);
+}
+inline float3 ClampEpsilon11(float3 v)
+{
+    return clamp(v, epsilon - 1, 1 - epsilon);
+}
+inline float4 ClampEpsilon11(float4 v)
+{
+    return clamp(v, epsilon - 1, 1 - epsilon);
+}
+
+// Sigmoid Parameters
+#define SIGMOID_NEAR .1
+#define SIGMOID_NEAR4 float4(SIGMOID_NEAR,SIGMOID_NEAR,SIGMOID_NEAR,SIGMOID_NEAR)
+#define SIGMOID_FAR .9
+#define SIGMOID_FAR4 float4(SIGMOID_FAR,SIGMOID_FAR,SIGMOID_FAR,SIGMOID_FAR)
+
+
+inline float4 mir2D(Texture2D tex, float2 uv)
+{
+    return float4(ClampEpsilon(tex.SampleLevel(sampleTypeMirror, uv, 0).xyz), 1);
+}
+
+
+cbuffer ConstantBuffer : register(b0)
+{
+    //Mouse position in uv coordinates. 0.5,0.5 is center screen
+    float2 LOOK_AT;
+    float2 LOOK_AT_DELTA;
+    
+    //Number of render passes
+    float NumPasses;
+    //Time for use in time related functions
+    float TotalTime;
+    //Scalar for the depth, default to 1.0
+    float DepthScale;
+    //Fresnel Power scalar, default to 1.0
+    float FresnelPower;
+    //Fresnel reflectance scalar. default to 1.0
+    float FresnelReflectance;
+    //Animation speed scalar. Default to 1.0
+    float AnimateSpeed;
+    //Shader alpha is set to 1.0 / PassNum
+    float ShaderAlpha;
+    //Mix of fresnel effect with diffuse effect, if needed
+    float FresnelMix;
+    //1 when control key is pressed, else 0
+    float KeyControl;
+    //1 when shift key is pressed, else 0
+    float KeyShift;
+    //1 when alt key is pressed, else 0
+    float KeyAlt;
+    //1 when left mouse button is pressed, else 0
+    float LButton;
+    //1 when right mouse button is pressed, else 0
+    float RButton;
+    //The current pass number, out of NumPasses total, starts at Zero
+    float PassNum;
+    //Specular power, default is 1.0
+    float SpecularPower;
+    //Specular intensity. default is 1.0
+    float SpecularIntensity;
+    //Radius to sample depthMap or normalMap when creating normals
+    float normalRadius;
+    //Mix1,2,3 are reserved for future use
+    float HeightScale;
+    float ViewZ;
+    float SunZ;
+    
+    float MaterialIndex;
+    float ParallaxScale;
+    float ParallaxScaleOMD;
+    float Mix3;
+    
+    float f1;
+    float f2;
+    float f3;
+    float f4;
+    
+    float f5;
+    float f6;
+    float f7;
+    float f8;
+    
+    float f9;
+    float f10;
+    float f11;
+    float f12;
+};
+static vec3 camPos0 = vec3(f11, f12, ViewZ);
+
+// Struct for Configurable Values in Gradient Modulation
+struct GradientModulationConfig
+{
+    float timeFactor; // Range: 0.0 to infinity
+    
+    float4 depthCross;
+    float depthRange;
+    
+    float2 uv0;
+    float2 uv;
+    
+    ivec2 isz;
+    float2 oosz;
+    float2 ooszd;
+    float2 ooszrt;
+    
+    float3 sunPos;
+    float3 pixelToSunSegment;
+    float3 pixel0ToSunSegment;
+    float3 pixelToSunDir;
+    float3 pixel0ToSunDir;
+    float3 pixelScaled;
+    float3 pixel0Scaled;
+    float3 sunHalfVec;
+    
+    float3 viewPos;
+    float3 viewPos0;
+    float3 viewDir;
+    float3 viewDir0;
+    float4 diffuse;
+    float4 diffuse0;
+    
+    float centerDist0;
+    float centerDist;
+    float viewDist;
+    vec3 reflectDir;
+    float reflectFactor;
+    
+    
+    float NdotV;
+    float NdotL;
+    float HdotV;
+    float NdotH;
+    float VdotL;
+    
+    vec2 gradient;
+    vec2 modulation;
+    float depth;
+    float invDepth;
+    vec3 normal;
+    vec2 depthCurve;
+    
+    vec2 gradient0;
+    vec2 modulation0;
+    float depth0;
+    vec3 normal0;
+    vec2 depthCurve0;
+    
+};
+
+static GradientModulationConfig config;
+
+
+
+float GetSPDCorrection(float wavelength)
+{
+    // Use a high-accuracy spectral power distribution correction function
+    // Based on research-quality data and scientific models
+    return 1.0 + 0.1 * sin(wavelength * 2 * 3.14159 / 0.6328);
+}
+
+
+
+float3x3 CreateSkewMatrix(float3 tangent, float amount)
+{
+    float3 skewAxis = normalize(cross(tangent, float3(0, 1, 0))); // Assumes Y is up
+    float3x3 skewMatrix = float3x3(1, 0, 0,
+                                   0, 1, 0,
+                                   0, 0, 1);
+
+    skewMatrix[0][2] = skewAxis.x * amount; // Skew along the X-axis of the tangent space 
+    skewMatrix[1][2] = skewAxis.y * amount; // Skew along the Y-axis of the tangent space
+    skewMatrix[2][2] = skewAxis.z * amount; // Skew along the Z-axis of the tangent space
+
+    return skewMatrix;
+}
+
+float3 skewNormalX(float3 normal, float amount)
+{
+    return normalize(mul(normal, CreateSkewMatrix(normal, amount))); // Added normalization
+}
+
+// Inline linear interpolation
+inline float lerp(float a, float b, float t)
+{
+    return a + t * (b - a);
+}
+
+
+// Improved gradient function with a larger set of gradient vectors
+inline float gradient(uint hash, float3 p)
+{
+    static const float3 gradients[16] =
+    {
+        float3(1, 1, 0), float3(-1, 1, 0), float3(1, -1, 0), float3(-1, -1, 0),
+        float3(1, 0, 1), float3(-1, 0, 1), float3(1, 0, -1), float3(-1, 0, -1),
+        float3(0, 1, 1), float3(0, -1, 1), float3(0, 1, -1), float3(0, -1, -1),
+        float3(1, 1, 1), float3(-1, 1, 1), float3(1, -1, 1), float3(-1, -1, 1)
+    };
+
+    return dot(gradients[hash & 16], p);
+}
+
+
+float gradient(uint hash, float3 f, float sx, float cy, float tz)
+{
+    // Construct a pseudo-random gradient vector based on the hash value
+    float u = hash * 0.1031;
+    float v = hash * 0.11113;
+    float w = hash * 0.13287;
+    
+    // Apply the gradient vector to the fractional coordinates
+    return (u * f.x + v * f.y + w * f.z) * (sx + cy + tz);
+}
+
+
+inline float slerp(float q1, float q2, float t)
+{
+    // Ensure the shortest arc for interpolation
+    float cosOmega = dot(q1, q2);
+    if (cosOmega < 0.0)
+    {
+        q2 = -q2;
+        cosOmega = -cosOmega;
+    }
+
+    // Calculate interpolation factors based on angle
+    float k0, k1;
+    if (cosOmega > 0.9999)
+    {
+        // Small angles: approximate linear interpolation
+        k0 = 1.0 - t;
+        k1 = t;
+    }
+    else
+    {
+        // Standard spherical linear interpolation
+        float sinOmega = sqrt(1.0 - cosOmega * cosOmega);
+        float omega = atan2(sinOmega, cosOmega);
+        float inv_sin_omega = 1.0 / sinOmega;
+        k0 = sin((1.0 - t) * omega) * inv_sin_omega;
+        k1 = sin(t * omega) * inv_sin_omega;
+    }
+
+    return k0 * q1 + k1 * q2; // Interpolated result
+}
+
+inline float4 slerp(float4 q1, float4 q2, float t)
+{
+    float cos_omega = dot(q1, q2);
+    
+    if (cos_omega < 0.0)
+    {
+        q2 = -q2;
+        cos_omega = -cos_omega;
+    }
+
+    float k0, k1;
+    if (cos_omega > 0.9999)
+    {
+        k0 = 1.0 - t;
+        k1 = t;
+    }
+    else
+    {
+        float sin_omega = sqrt(1.0 - cos_omega * cos_omega);
+        float omega = atan2(sin_omega, cos_omega);
+        float inv_sin_omega = 1.0 / sin_omega;
+        k0 = sin((1.0 - t) * omega) * inv_sin_omega;
+        k1 = sin(t * omega) * inv_sin_omega;
+    }
+
+    return k0 * q1 + k1 * q2;
+}
+inline float3 slerp(float3 q1, float3 q2, float t)
+{
+    float cos_omega = dot(q1, q2);
+    if (cos_omega < 0.0)
+    {
+        q2 = -q2;
+        cos_omega = -cos_omega;
+    }
+
+    float k0, k1;
+    if (cos_omega > 0.9999)
+    {
+        k0 = 1.0 - t;
+        k1 = t;
+    }
+    else
+    {
+        float sin_omega = sqrt(1.0 - cos_omega * cos_omega);
+        float omega = atan2(sin_omega, cos_omega);
+        float inv_sin_omega = 1.0 / sin_omega;
+        k0 = sin((1.0 - t) * omega) * inv_sin_omega;
+        k1 = sin(t * omega) * inv_sin_omega;
+    }
+
+    return k0 * q1 + k1 * q2;
+}
+
+inline float2 slerp(float2 q1, float2 q2, float t)
+{
+    float cos_omega = dot(q1, q2);
+    float2 q2_neg = -q2;
+    if (cos_omega < 0.0)
+    {
+        q2 = q2_neg;
+        cos_omega = -cos_omega;
+    }
+
+    float k0, k1;
+    if (cos_omega > 0.9999)
+    {
+        k0 = 1.0 - t;
+        k1 = t;
+    }
+    else
+    {
+        float sin_omega = sqrt(1.0 - cos_omega * cos_omega);
+        float omega = atan2(sin_omega, cos_omega);
+        float inv_sin_omega = 1.0 / sin_omega;
+        k0 = sin((1.0 - t) * omega) * inv_sin_omega;
+        k1 = sin(t * omega) * inv_sin_omega;
+    }
+
+    return k0 * q1 + k1 * q2;
+}
+inline float lerp(float x, float x0, float x1, float y0, float y1)
+{
+    if (abs(x1 - x0) < epsilon) // Added check for near-zero difference
+        return y0;
+    return y0 + (x - x0) * (y1 - y0) / (x1 - x0);
+}
+
+
+
+
+float3 fade(float3 t)
+{
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+float4 fade(float4 t)
+{
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+
+
+// Based on the article "Improved Noise Reference Implementation" by Stefan Gustavson
+float3 mod289(float3 x)
+{
+    return x - floor(x * (1.0 / 289.0)) * 289.0;
+}
+
+float2 mod289(float2 x)
+{
+    return x - floor(x * (1.0 / 289.0)) * 289.0;
+}
+
+float3 permute(float3 x)
+{
+    return mod289(((x * 34.0) + 1.0) * x);
+}
+inline float cosTime01(float timeMul)
+{
+    return ClampEpsilon((1.0 + cos(TotalTime * timeMul)) * 0.5);
+}
+inline float sinTime01(float timeMul)
+{
+    return ClampEpsilon((1.0 + sin(TotalTime * timeMul)) * 0.5);
+}
+
+// Procedural Noise
+inline float pnoise(float3 uvw, float time)
+{
+    float2 noiseScale = float2(1.0, 1.0);
+    float2 noiseOffset = float2(0.0, 0.0);
+    float frequency = 1.0;
+    float amplitude = 1.0;
+    float octaves = 6.0;
+  
+    float2 uvNoise = uvw.xy * noiseScale + noiseOffset;
+    float noisev = 0.0;
+  
+    for (int i = 0; i < octaves; i++)
+    {
+        noisev += sin((uvNoise.x + time * frequency + uvw.z * 10.0) * (1 << i)) * amplitude;
+        amplitude *= 0.5;
+    }
+  
+    return noisev;
+}
+
+
+inline float pnoise(float2 uv, float time, float index)
+{
+    return pnoise(float3(uv, index), time);
+}
+
+inline float pnoise(float2 uv, float time)
+{
+    return pnoise(uv, time, 0);
+}
+
+
+inline float PerlinNoise(float3 uvw)
+{
+    return pnoise(uvw, TotalTime * timr);
+}
+
+inline float PerlinNoise(float2 uv)
+{
+    return pnoise(vec3(uv, 0), TotalTime * timr);
+}
+
+
+inline float PerlinNoise(float2 uv, float time)
+{
+    return pnoise(float3(uv, 0.0), time);
+}
+
+inline float pnoise()
+{
+    return pnoise(vec3(config.uv, config.depth), TotalTime * timr);
+}
+
+inline float2 pnoise2()
+{
+    return vec2(pnoise(vec3(config.uv, config.depth), TotalTime * timr), pnoise(vec3(config.uv, config.depth + 1), TotalTime * timr));
+}
+
+inline float3 pnoise3()
+{
+    return vec3(pnoise(vec3(config.uv, config.depth), TotalTime * timr), pnoise(vec3(config.uv, config.depth + 1), TotalTime * timr), pnoise(vec3(config.uv, config.depth + 2), TotalTime * timr));
+}
+
+// Helper functions
+float rand(float2 co)
+{
+    return frac(sin(dot(co.xy, float2(12.9898, 78.233))) * 43758.5453);
+}
+
+float3 interpolate(float3 a, float3 b, float3 t)
+{
+    float3 result;
+    result.x = a.x + t.x * (b.x - a.x);
+    result.y = a.y + t.y * (b.y - a.y);
+    result.z = a.z + t.z * (b.z - a.z);
+
+    // Apply a custom interpolation curve
+    result.x = 3.0 * result.x * result.x - 2.0 * result.x * result.x * result.x;
+    result.y = 3.0 * result.y * result.y - 2.0 * result.y * result.y * result.y;
+    result.z = 3.0 * result.z * result.z - 2.0 * result.z * result.z * result.z;
+    
+    return result;
+}
+
+float4 interpolate(float4 a, float4 b, float4 t)
+{
+    float4 result;
+    result.x = a.x + t.x * (b.x - a.x);
+    result.y = a.y + t.y * (b.y - a.y);
+    result.z = a.z + t.z * (b.z - a.z);
+    result.w = a.w + t.w * (b.w - a.w);
+    // Apply a custom interpolation curve
+    result.x = 3.0 * result.x * result.x - 2.0 * result.x * result.x * result.x;
+    result.y = 3.0 * result.y * result.y - 2.0 * result.y * result.y * result.y;
+    result.z = 3.0 * result.z * result.z - 2.0 * result.z * result.z * result.z;
+    result.w = 3.0 * result.w * result.w - 2.0 * result.w * result.w * result.w;
+    
+    return result;
+}
+
+
+float Gaussian(float x, float sigma)
+{
+    return exp(-0.5 * (x * x) / (sigma * sigma)) / (sqrt(2.0 * 3.14159265358979323846) * sigma);
+}
+
+float Gaussian(float x, float y, float sigma)
+{
+    return exp(-0.5 * (x * y) / (sigma * sigma)) / (sigma * sqrt(2.0 * 3.14159265358979323846));
+}
+
+float4 GaussianBilinear(float4 p00, float4 p11, float2 uv)
+{
+    float2 uv2 = uv * uv;
+    float4 a = slerp(p00, p11, uv2.x);
+    float4 b = slerp(p00, p11, 1.0 - uv2.x);
+    return slerp(a, b, saturate(sqrt(uv2.x + uv2.y)));
+}
+
+float4 RadialBilinear(float4 p00, float4 p11, float2 uv)
+{
+    float2 uvLength = length(uv * 2.0 - 1.0);
+    float4 a = slerp(p00, p11, uvLength.x);
+    float4 b = slerp(p00, p11, uvLength.y);
+    return slerp(a, b, uvLength.x * uvLength.y);
+}
+
+float4 SinusoidalBilinear(float4 p00, float4 p11, float2 uv)
+{
+    float2 uvSin = sin(uv * 3.14159 * 2.0);
+    float4 a = slerp(p00, p11, uvSin.x);
+    float4 b = slerp(p00, p11, uvSin.y);
+    return slerp(a, b, uvSin.x * uvSin.y);
+}
+
+float4 FractalBilinear(float4 p00, float4 p11, float2 uv)
+{
+    float2 uvFractal = uv;
+    float4 result = p00;
+    float weight = 1.0;
+    for (int i = 0; i < 4; i++)
+    {
+        float4 a = slerp(p00, p11, uvFractal.x);
+        float4 b = slerp(p00, p11, uvFractal.y);
+        result += slerp(a, b, uvFractal.x * uvFractal.y) * weight;
+        uvFractal *= 2.0;
+        weight *= 0.5;
+    }
+    return result;
+}
+
+float4 HolographicBilearWithCaustics(float4 p00, float4 p11, float2 uv, float time)
+{
+    float2 holographicUV = uv + float2(
+config.depth * sin(uv.x * 10.0 + time * 2.0) * 0.01,
+config.depth * cos(uv.y * 20.0 + time * 3.0) * 0.01
+    );
+    
+    float4 a = config.depth * GaussianBilinear(p00, p11, holographicUV);
+    float4 b = config.depth * GaussianBilinear(p00, p11, holographicUV + float2(sin(time * 5.0), cos(time * 7.0)) * 0.02);
+    float4 c = config.depth * GaussianBilinear(p00, p11, holographicUV + float2(sin(time * 10.0), cos(time * 13.0)) * 0.03);
+    
+    float causticIntensity = config.depth * .01 * sin(uv.x * 50.0 + time * 10.0) * sin(uv.y * 70.0 + time * 15.0) * 0.5 + 0.5;
+    return (a + b + c) / 3.0 * causticIntensity * .05;
+}
+
+float4 RefractedHolographicBilinear(float4 p00, float4 p11, float2 uv, float time)
+{
+    float2 holographicUV = uv + float2(
+        sin(uv.x * 2.0 + time * 2.0) * 0.01,
+        cos(uv.y * 3.0 + time * 3.0) * 0.01
+    ) * pnoise(vec3(uv, 0), time);
+    
+    float2 refractedUV = holographicUV + float2(
+        sin(holographicUV.x * 5.0 + time * 3.0) * 0.02,
+        cos(holographicUV.y * 7.0 + time * 5.0) * 0.02
+    ) * pnoise(vec3(uv, 1), time);
+    
+    float4 a = GaussianBilinear(p00, p11, refractedUV);
+    float4 b = GaussianBilinear(p00, p11, refractedUV + float2(sin(time * 2.0), cos(time * 3.0)) * 0.03);
+    float4 c = GaussianBilinear(p00, p11, refractedUV + float2(sin(time * 3.0), cos(time * 5.0)) * 0.04);
+    
+    return (a + b + c) / 3.0;
+}
+
+float4 VolumetricHolographicBilinear(float4 p00, float4 p11, float2 uv, float time)
+{
+    // Add some noise to the uv coordinates to give it a more organic feel
+    float2 noisyUV = uv + float2(
+        sin(uv.x * 3.0 + time * 2.0) / 2 * 0.005 * config.depth * (PerlinNoise(uv, time)),
+        cos(uv.y * 5.0 + time * 3.0) / 2 * 0.003 * config.depth * (PerlinNoise(uv, time))
+    );
+    
+    // Use a more complex refracting function to create a sense of depth
+    float2 refractedUV = noisyUV + float2(
+        sin(noisyUV.x + time) * 0.004,
+        cos(noisyUV.y + time) * 0.002
+    );
+    
+    // Use a combination of spherical and cylindrical coordinates to create a more intricate pattern
+    float4 a = slerp(p00, p11, refractedUV.x);
+    float4 b = slerp(p00, p11, refractedUV.x + sin(time * 3.0) * 0.005);
+    float4 c = slerp(p00, p11, refractedUV.y);
+    float4 d = slerp(p00, p11, refractedUV.y + sin(time * 7.0) * 0.009);
+    
+    // Combine the results using a more complex blending function
+    return slerp(slerp(p00, RefractedHolographicBilinear(a, b, uv / 2, time) * (config.depth * .15 + .75), .5),
+            slerp(p11, RefractedHolographicBilinear(c, d, uv * 2, time) * (config.depth * .15 + .5), .5),
+    .5)
+    + .01 * float4(
+        sin(uv.x * 3.0 + time) * 0.005 * PerlinNoise(uv, time / 3),
+        cos(uv.y * 5.0 + time) * 0.005 * PerlinNoise(uv, time / 5),
+        sin(uv.x * 7.0 + time) * 0.005 * PerlinNoise(uv, time),
+        cos(uv.y * 9.0 + time) * 0.005 * PerlinNoise(uv, time)
+    );
+}
+
+// Example usage
+float3 NoiseGenerator(float3 position, float scale, float frequency, float amplitude, float lacunarity, float persistence)
+{
+    float3 fnoise = float3(0.0, 0.0, 0.0);
+    float totalAmplitude = 0.0;
+    
+    for (int i = 0; i < 6; i++)
+    {
+        fnoise += PerlinNoise(position * frequency) * amplitude;
+        totalAmplitude += amplitude;
+        frequency *= lacunarity;
+        amplitude *= persistence;
+    }
+    
+    return fnoise / totalAmplitude;
+}
+
+
+
+
+struct GDMFConfig
+{
+    float nearPoint;
+    float farPoint;
+    float transitionPoint;
+    float polynomialDegree;
+    float polynomialWeight;
+    float skewFactor;
+    float offsetFactor;
+    float nearSlope;
+    float farSlope;
+    float transitionWidth;
+};
+
+// Helper function to create a GDMFConfig struct
+GDMFConfig CreateGDMFConfig(float nearPoint, float farPoint, float transitionPoint, float polynomialDegree, float polynomialWeight, float skewFactor, float offsetFactor, float nearSlope, float farSlope, float transitionWidth)
+{
+    GDMFConfig config;
+    config.nearPoint = nearPoint;
+    config.farPoint = farPoint;
+    config.transitionPoint = transitionPoint;
+    config.polynomialDegree = polynomialDegree;
+    config.polynomialWeight = polynomialWeight;
+    config.skewFactor = skewFactor;
+    config.offsetFactor = offsetFactor;
+    config.nearSlope = nearSlope;
+    config.farSlope = farSlope;
+    config.transitionWidth = transitionWidth;
+    return config;
+}
+
+float EvaluatePolynomial(float x, float degree, float weight)
+{
+    float result = 0.0f;
+    for (int i = 0; i <= degree; ++i)
+    {
+        result += weight * pow(x, i) / pow(2.0f, i);
+    }
+    return result;
+}
+// Generalized Depth Mapping Function
+float GDMF(float depth, GDMFConfig config)
+{
+    float normalizedDepth = (depth - config.nearPoint) / (config.farPoint - config.nearPoint);
+    float polynomialTerm = EvaluatePolynomial(normalizedDepth, config.polynomialDegree, config.polynomialWeight);
+    float skewedDepth = pow(normalizedDepth, config.skewFactor);
+    float transitionFactor = smoothstep(0.0f, config.transitionWidth, (depth - config.transitionPoint) / (config.farPoint - config.transitionPoint));
+    float linearTerm = slerp(normalizedDepth * config.nearSlope, normalizedDepth * config.farSlope, transitionFactor);
+    float mappedDepth = slerp(linearTerm, polynomialTerm, transitionFactor);
+    return config.nearPoint + (mappedDepth + config.offsetFactor) * (config.farPoint - config.nearPoint);
+}
+
+
+
+
+
+
+
+inline float lerp1D(float t, float a, float b)
+{
+    // Linear interpolation
+    return a + t * (b - a);
+}
+
+inline vec2 lerp(vec2 a, vec2 b, float t)
+{
+    return a + t * (b - a);
+}
+inline vec3 lerp(vec3 a, vec3 b, float t)
+{
+    return a + t * (b - a);
+}
+inline vec4 lerp(vec4 a, vec4 b, float t)
+{
+    return a + t * (b - a);
+}
+
+
+inline float sum(float2 v)
+{
+    return v.x + v.y;
+}
+inline float sum(float3 v)
+{
+    return v.x + v.y + v.z;
+}
+inline float sum(float4 v)
+{
+    return v.x + v.y + v.z + v.w;
+}
+inline float variation(float4 dc2)
+{
+    return max(max(max(dc2.x, dc2.y), dc2.z), dc2.w) - min(min(min(dc2.x, dc2.y), dc2.z), dc2.w);
+}
+inline float variation(float3 dc2)
+{
+    return max(max(dc2.x, dc2.y), dc2.z) - min(min(dc2.x, dc2.y), dc2.z);
+}
+
+inline float4 variation(float4 dc2, float4 dc6)
+{
+    return float4(max(dc2.x, dc6.x) - min(dc2.x, dc6.x),
+                max(dc2.y, dc6.y) - min(dc2.y, dc6.y),
+                max(dc2.z, dc6.z) - min(dc2.z, dc6.z),
+                max(dc2.w, dc6.w) - min(dc2.w, dc6.w));
+}
+inline float3 variation(float4 dc2, float3 dc6)
+{
+    return float3(max(dc2.x, dc6.x) - min(dc2.x, dc6.x),
+                max(dc2.y, dc6.y) - min(dc2.y, dc6.y),
+                max(dc2.z, dc6.z) - min(dc2.z, dc6.z));
+}
+float2 variation(float2 dc2, float2 dc6)
+{
+    return float2(max(dc2.x, dc6.x) - min(dc2.x, dc6.x),
+                max(dc2.y, dc6.y) - min(dc2.y, dc6.y));
+}
+inline float variation(float dc2, float dc6)
+{
+    return max(dc2.x, dc6.x) - min(dc2.x, dc6.x);
+}
+inline float variation(float2 v)
+{
+    return max(v.x, v.y) - min(v.x, v.y);
+}
+
+static const float3 attenuationPointValue = float3(1.0, 0.2, 0.01); // Precalculate
+inline float3 attenuationPoint()
+{
+    return attenuationPointValue;
+}
+
+inline float randomSpin(int rayIndex)
+{
+    float seed = float(rayIndex) * 98765.4321;
+    float spin = frac(cos(seed) * 95123.4567);
+    return spin;
+}
+
+inline float randomNoise1(float2 uv)
+{
+    // Example: Simple noise function based on uv coordinates
+    // Use a more sophisticated noise function if necessary
+    return frac(sin(dot(uv, float2(12.9898, 78.233))) * 43758.5453);
+}
+
+
+float2 randomNoise2(float2 seed)
+{
+    return frac(sin(float2(dot(seed, float2(12.9898, 78.233)), dot(seed, float2(62.9191, 73.7453)))) * 43758.5453);
+}
+
+
+inline float randWorley(float2 uv)
+{
+    float d = 1.0;
+    uv *= 5.0; // Adjust for bubble size
+    [unroll(10)]
+    for (int x = -1; x <= 1; x++)
+    {
+        [unroll(10)]
+        for (int y = -1; y <= 1; y++)
+        {
+            float2 lattice = floor(uv) + float2(x, y);
+            float2 offset = randomNoise2(lattice);
+            d = min(d, length(uv - lattice - offset));
+        }
+    }
+    return d;
+}
+
+// Worley Noise function for bubbly effect
+float randWorleyNoise(vec2 uv, float bubbleSize)
+{
+    float d = 1.0;
+    uv *= bubbleSize;
+    [unroll]
+    for (int x = -1; x <= 1; x++)
+    {
+        [unroll]
+        for (int y = -1; y <= 1; y++)
+        {
+            vec2 lattice = floor(uv) + float2(x, y);
+            vec2 offset = vec2(PerlinNoise(vec3(lattice, 0)), PerlinNoise(vec3(lattice, 0)));
+            d = min(d, length(uv - lattice - offset));
+        }
+    }
+    return d;
+}
+
+float3 randStratifiedNoise(float3 position, float3 frequency, float3 amplitude)
+{
+    // Stratified noise combines multiple noise layers at different frequencies and amplitudes
+    float noiseLayer1 = randWorleyNoise(config.modulation * position.xy + position.z, frequency.x) * amplitude.x;
+    float noiseLayer2 = randWorleyNoise(config.modulation * position.xy + position.z, frequency.y) * amplitude.y;
+    float noiseLayer3 = randWorleyNoise(config.modulation * position.xy + position.z, frequency.z) * amplitude.z;
+    return (noiseLayer1 + noiseLayer2 + noiseLayer3) / 3.0;
+}
+
+
+
+float randLayeredNoise(vec3 position)
+{
+    // Combining multiple noise functions with different frequencies
+    float noise1 = randWorleyNoise(position.xy, 0.5); // Lower frequency noise
+    float noise2 = randWorleyNoise(position.xy, 1.5); // Higher frequency noise
+    float noise3 = randWorleyNoise(position.xy, 3.0); // Even higher frequency noise
+
+    // Combining the noise functions to create layered effect
+    return clamp((noise1 + noise2 + noise3) / 3.0, epsilon, (1 - epsilon)); // Average to get layered noise
+}
+
+float randNoise(float2 uv)
+{
+    // Implement a basic noise function or use a GPU's built-in noise function
+    // Placeholder for noise - replace with a specific noise function as needed
+    return frac(sin(dot(uv, float2(12.9898, 78.233))) * 43758.5453);
+}
+
+inline float3 attenuationSun()
+{
+    return float3(1, 1.0f / (SunZ + ViewZ) * .2, 1.0f / pow(SunZ + ViewZ, 2) * .05);
+}
+// Compute the attenuation factor based on the distance from the light source
+inline float ComputeAttenuation(float3 lightPosition, float3 worldPosition, float x, float y, float z)
+{
+    float distance = length(lightPosition - worldPosition);
+    return 1.0 / (x + y * distance + z * distance * distance);
+}
+
+// Compute the attenuation factor with depth scaling
+inline float ComputeAttenuation(float distance, float3 attenuation)
+{
+    return 1.0 / (attenuation.x + attenuation.y * distance + attenuation.z * distance * distance);
+}
+
+struct PS_INPUT
+{
+    float4 Position : SV_Position;
+    float2 uv : UV0;
+    float3 ViewDir : UV1;
+    float4 Color : COLOR0;
+};
+
+
+
+struct VS_INPUT
+{
+    float3 Position : POSITION;
+    float2 uv : UV0;
+};
+
+struct psout
+{
+    float4 rt1 : SV_Target0;
+    float4 rt2 : SV_Target1;
+    float4 rt3 : SV_Target2;
+    float4 rt4 : SV_Target3;
+    float4 rt5 : SV_Target4;
+    float4 rt6 : SV_Target5;
+    float4 rt7 : SV_Target6;
+    float4 rt8 : SV_Target7;
+};
+
+
+Texture2D diffuseMap : register(t0);
+Texture2D<float> depthMap : register(t1);
+Texture2D<float> gratingDepth1 : register(t2);
+Texture2D<float> gratingDepth2 : register(t3);
+Texture2D<float> gratingDepth3 : register(t4);
+Texture2D<float> gratingDepth4 : register(t5);
+Texture2D skylineMap : register(t6);
+Texture2D rainbowMap2 : register(t7);
+Texture2D gratingMap1 : register(t8);
+Texture2D gratingMap2 : register(t9);
+Texture2D gratingMap3 : register(t10);
+Texture2D gratingMap4 : register(t11);
+Texture2D gradient1 : register(t12);
+Texture2D gradient2 : register(t13);
+Texture2D gradient3 : register(t14);
+Texture2D gradient4 : register(t15);
+Texture2D<float3> noiseMap1 : register(t16);
+Texture2D<float3> noiseMap2 : register(t17);
+Texture2D<float3> noiseMap3 : register(t18);
+Texture2D<float3> noiseMap4 : register(t19);
+
+//Texture2D normalMap : register(t4);
+Texture2D<float3> normalMap : register(t20);
+Texture2D<float3> gratingNormal1 : register(t21);
+Texture2D<float3> gratingNormal2 : register(t22);
+Texture2D<float3> gratingNormal3 : register(t23);
+Texture2D<float3> gratingNormal4 : register(t24);
+//Texture2D normalMap2 : register(t5);
+Texture2D rtMap1 : register(t25);
+Texture2D rtMap2 : register(t26);
+Texture2D rtMap3 : register(t27);
+Texture2D rtMap4 : register(t28);
+Texture2D rtMap5 : register(t29);
+Texture2D rtMap6 : register(t30);
+Texture2D rtMap7 : register(t31);
+Texture2D rtMap8 : register(t32);
+Texture2D rtMap9 : register(t33);
+Texture2D rtMap10 : register(t34);
+Texture2D rtMap11 : register(t35);
+Texture2D rtMap12 : register(t36);
+Texture2D rtMap13 : register(t37);
+Texture2D rtMap14 : register(t38);
+Texture2D rtMap15 : register(t39);
+Texture2D rtMap16 : register(t40);
+Texture2D computeMap : register(t41);
+
+
+
+static vec4 AuroraColors[6] =
+{
+    vec4(0.0, 0.4, 1.0, 1.0), // Blue
+    vec4(0.0, 1.0, 0.0, 1.0), // Green
+    vec4(0.0, 0.2, 0.8, 1.0), // Blue-Green
+    vec4(1.0, 0.5, 0.0, 1.0), // Orange
+    vec4(0.8, 0.0, 0.8, 1.0), // Purple
+    vec4(1.0, 1.0, 1.0, 1.0) // White
+};
+
+inline float2 GetOosz(Texture2D<float4> tex) // Generalized for different texture types
+{
+    uint width, height;
+    tex.GetDimensions(width, height); // Use uint to match GetDimensions
+    return 1.0 / float2(width, height);
+}
+inline float2 GetOosz(Texture2D<float3> tex) // Generalized for different texture types
+{
+    uint width, height;
+    tex.GetDimensions(width, height); // Use uint to match GetDimensions
+    return 1.0 / float2(width, height);
+}
+inline float2 GetOosz(Texture2D<float2> tex) // Generalized for different texture types
+{
+    uint width, height;
+    tex.GetDimensions(width, height); // Use uint to match GetDimensions
+    return 1.0 / float2(width, height);
+}
+inline float2 GetOosz(Texture2D<float> tex) // Generalized for different texture types
+{
+    uint width, height;
+    tex.GetDimensions(width, height); // Use uint to match GetDimensions
+    return 1.0 / float2(width, height);
+}
+inline float2 ooszNormal()
+{
+    return GetOosz(normalMap);
+}
+
+inline float2 ooszRT()
+{
+    return GetOosz(rtMap1);
+}
+
+inline float2 ooszDep()
+{
+    return GetOosz(depthMap);
+}
+
+inline float2 ooszDiffuse()
+{
+    return GetOosz(diffuseMap);
+}
+
+
+inline vec3 pow3(vec3 v, float p)
+{
+    return vec3(pow(v.x, p), pow(v.y, p), pow(v.z, p));
+}
+
+inline vec4 pow4(vec4 v, float p)
+{
+    return vec4(pow(v.x, p), pow(v.y, p), pow(v.z, p), pow(v.w, p));
+}
+
+inline float avg4(vec4 v)
+{
+    return (v.x + v.y + v.z + v.w) * .25;
+}
+
+inline float avg3(vec3 v)
+{
+    return (v.x + v.y + v.z) * 0.3333;
+}
+
+inline float avg2(vec2 v)
+{
+    return (v.x + v.y) * 0.5;
+}
+
+inline float noise1(vec4 v)
+{
+    return noiseMap1.SampleLevel(sampleTypeMirror, v.xy + v.zw, 0).x;
+}
+inline float noise1(vec3 v)
+{
+    return noiseMap1.SampleLevel(sampleTypeMirror, v.xy + v.z, 0).x;
+}
+inline float noise1(vec2 v)
+{
+    return noiseMap1.SampleLevel(sampleTypeMirror, v.xy, 0).x;
+}
+inline float noise1(float v)
+{
+    return noiseMap1.SampleLevel(sampleTypeMirror, vec2(v, v), 0).x;
+}
+
+inline vec2 noise2(vec4 v)
+{
+    return noiseMap2.SampleLevel(sampleTypeMirror, v.xy + v.zw, 0).xy;
+}
+inline vec2 noise2(vec3 v)
+{
+    return noiseMap2.SampleLevel(sampleTypeMirror, v.xy + v.z, 0).xy;
+}
+inline vec2 noise2(vec2 v)
+{
+    return noiseMap2.SampleLevel(sampleTypeMirror, v.xy, 0).xy;
+}
+inline vec2 noise2(float v)
+{
+    return noiseMap2.SampleLevel(sampleTypeMirror, vec2(v, v), 0).xy;
+}
+
+inline vec3 noise3(vec4 v)
+{
+    return noiseMap3.SampleLevel(sampleTypeMirror, v.xy, 0).xyz;
+}
+inline vec3 noise3(float3 v)
+{
+    return noiseMap3.SampleLevel(sampleTypeMirror, v.xy + v.z, 0).xyz;
+}
+inline vec3 noise3(vec2 v)
+{
+    return noiseMap3.SampleLevel(sampleTypeMirror, v.xy, 0).xyz;
+}
+inline vec3 noise3(float v)
+{
+    return noiseMap3.SampleLevel(sampleTypeMirror, vec2(v, v), 0).xyz;
+}
+
+inline vec4 noise4(vec4 v)
+{
+    return float4(noiseMap4.SampleLevel(sampleTypeMirror, v.xy, 0).xyz, noiseMap3.SampleLevel(sampleTypeMirror, v.zw, 0).x);
+
+}
+inline vec4 noise4(float3 v)
+{
+    return float4(noiseMap4.SampleLevel(sampleTypeMirror, v.xy, 0).xyz, noiseMap3.SampleLevel(sampleTypeMirror, v.zz, 0).x);
+
+}
+inline vec4 noise4(vec2 v)
+{
+    return float4(noiseMap4.SampleLevel(sampleTypeMirror, v.xy, 0).xyz, noiseMap3.SampleLevel(sampleTypeMirror, v.yy, 0).x);
+
+}
+inline vec4 noise4(float v)
+{
+    return float4(noiseMap4.SampleLevel(sampleTypeMirror, vec2(v, v), 0).xyz, noiseMap3.SampleLevel(sampleTypeMirror, vec2(v, v), 0).x);
+}
+
+inline float3 RGBtoHSL(float3 color)
+{
+    float maxComponent = max(color.r, max(color.g, color.b));
+    float minComponent = min(color.r, min(color.g, color.b));
+    float range = maxComponent - minComponent;
+
+    float3 hsl;
+    hsl.z = (maxComponent + minComponent) / 2.0; // Lightness
+
+    if (range == 0.0)
+    {
+        hsl.x = 0.0; // Hue is undefined 
+        hsl.y = 0.0; // Saturation
+    }
+    else
+    {
+        hsl.y = range / (1.0 - abs(2.0 * hsl.z - 1.0)); // Saturation
+
+        float delta = range / (6.0 * maxComponent);
+
+        if (color.r == maxComponent)
+        {
+            hsl.x = (color.g - color.b) * delta;
+        }
+        else if (color.g == maxComponent)
+        {
+            hsl.x = (2.0 + (color.b - color.r) * delta);
+        }
+        else
+        {
+            hsl.x = (4.0 + (color.r - color.g) * delta);
+        }
+
+        hsl.x = fmod(hsl.x, 1.0); // Wrap hue to [0,1] range
+    }
+
+    return hsl;
+}
+
+inline float3 HSLtoRGB(float3 hsl)
+{
+    float C = (1.0 - abs(2.0 * hsl.z - 1.0)) * hsl.y; // Chroma
+    float x = C * (1.0 - abs(fmod(hsl.x * 6.0, 2.0) - 1.0));
+    float m = hsl.z - C / 2.0; // Lightness offset
+
+    float3 rgbPrime;
+
+    if (hsl.x < 1.0 / 6.0)
+    {
+        rgbPrime = float3(C, x, 0);
+    }
+    else if (hsl.x < 2.0 / 6.0)
+    {
+        rgbPrime = float3(x, C, 0);
+    }
+    else if (hsl.x < 3.0 / 6.0)
+    {
+        rgbPrime = float3(0, C, x);
+    }
+    else if (hsl.x < 4.0 / 6.0)
+    {
+        rgbPrime = float3(0, x, C);
+    }
+    else if (hsl.x < 5.0 / 6.0)
+    {
+        rgbPrime = float3(x, 0, C);
+    }
+    else
+    {
+        rgbPrime = float3(C, 0, x);
+    }
+
+    return rgbPrime + m;
+}
+
+
+
+
+static float UVHolographicIntensity = 0.2; // Controls the intensity of holographic distortion
+static float ChromaticAberrationStrength = 0.8; // Controls the strength of chromatic aberration
+
+static float normalDetailIntensity = 1.0; // Configurable intensity for normal details
+static float depthNormalImpact = 1.0; // Configurable impact of depth on normals
+
+
+
+
+
+inline float4 combine(vec4 color1, vec4 color2, vec4 color3)
+{
+    float4 ret = float4(0, 0, 0, 0);
+    vec4 totalCount = vec4(0, 0, 0, 0);
+
+    // Combine colors for each component
+    if (color1[0] > 0)
+    {
+        ret[0] += color1[0];
+        totalCount[0]++;
+    }
+    if (color2[0] > 0)
+    {
+        ret[0] += color2[0];
+        totalCount[0]++;
+    }
+    if (color3[0] > 0)
+    {
+        ret[0] += color3[0];
+        totalCount[0]++;
+    }
+
+    if (color1[1] > 0)
+    {
+        ret[1] += color1[1];
+        totalCount[1]++;
+    }
+    if (color2[1] > 0)
+    {
+        ret[1] += color2[1];
+        totalCount[1]++;
+    }
+    if (color3[1] > 0)
+    {
+        ret[1] += color3[1];
+        totalCount[1]++;
+    }
+
+    if (color1[2] > 0)
+    {
+        ret[2] += color1[2];
+        totalCount[2]++;
+    }
+    if (color2[2] > 0)
+    {
+        ret[2] += color2[2];
+        totalCount[2]++;
+    }
+    if (color3[2] > 0)
+    {
+        ret[2] += color3[2];
+        totalCount[2]++;
+    }
+    
+    if (color1[3] > 0)
+    {
+        ret[3] += color1[3];
+        totalCount[3]++;
+    }
+    if (color2[3] > 0)
+    {
+        ret[3] += color2[3];
+        totalCount[3]++;
+    }
+    if (color3[3] > 0)
+    {
+        ret[3] += color3[3];
+        totalCount[3]++;
+    }
+
+    // Average the combined colors
+    if (totalCount[0] > 0)
+    {
+        ret[0] /= totalCount[0];
+    }
+    if (totalCount[1] > 0)
+    {
+        ret[1] /= totalCount[1];
+    }
+    if (totalCount[2] > 0)
+    {
+        ret[2] /= totalCount[2];
+    }
+    if (totalCount[3] > 0)
+    {
+        ret[3] /= totalCount[3];
+    }
+    return ret;
+}
+inline float4 combine(vec4 a, vec4 b)
+{
+    return combine(a, b, vec4(0, 0, 0, 0));
+}
+inline float3 combine(vec3 a, vec3 b, vec3 c)
+{
+    return combine(float4(a, 0), float4(b, 0)).rgb;
+}
+inline float3 combine(vec3 a, vec3 b)
+{
+    return combine(a, b, vec3(0, 0, 0));
+}
+
+inline float3 combine(float3 colors[3])
+{
+    float3 ret = float3(0, 0, 0);
+    vec3 totalCount = vec3(0, 0, 0);
+
+    // Combine colors for each component using direct indexing
+    if (colors[0][0] > 0)
+    {
+        ret[0] += colors[0][0];
+        totalCount[0]++;
+    }
+    if (colors[1][0] > 0)
+    {
+        ret[0] += colors[1][0];
+        totalCount[0]++;
+    }
+    if (colors[2][0] > 0)
+    {
+        ret[0] += colors[2][0];
+        totalCount[0]++;
+    }
+
+    if (colors[0][1] > 0)
+    {
+        ret[1] += colors[0][1];
+        totalCount[1]++;
+    }
+    if (colors[1][1] > 0)
+    {
+        ret[1] += colors[1][1];
+        totalCount[1]++;
+    }
+    if (colors[2][1] > 0)
+    {
+        ret[1] += colors[2][1];
+        totalCount[1]++;
+    }
+
+    if (colors[0][2] > 0)
+    {
+        ret[2] += colors[0][2];
+        totalCount[2]++;
+    }
+    if (colors[1][2] > 0)
+    {
+        ret[2] += colors[1][2];
+        totalCount[2]++;
+    }
+    if (colors[2][2] > 0)
+    {
+        ret[2] += colors[2][2];
+        totalCount[2]++;
+    }
+
+    // Average the combined colors using direct indexing
+    if (totalCount[0] > 0)
+    {
+        ret[0] /= totalCount[0];
+    }
+    if (totalCount[1] > 0)
+    {
+        ret[1] /= totalCount[1];
+    }
+    if (totalCount[2] > 0)
+    {
+        ret[2] /= totalCount[2];
+    }
+    return ret;
+}
+
+inline float3 combine(float3 colors[2])
+{
+    float3 ret = float3(0, 0, 0);
+    vec3 totalCount = vec3(0, 0, 0);
+
+    // Combine colors for each component using direct indexing
+    if (colors[0][0] > 0)
+    {
+        ret[0] += colors[0][0];
+        totalCount[0]++;
+    }
+    if (colors[1][0] > 0)
+    {
+        ret[0] += colors[1][0];
+        totalCount[0]++;
+    }
+  
+
+    if (colors[0][1] > 0)
+    {
+        ret[1] += colors[0][1];
+        totalCount[1]++;
+    }
+    if (colors[1][1] > 0)
+    {
+        ret[1] += colors[1][1];
+        totalCount[1]++;
+    }
+
+
+    if (colors[0][2] > 0)
+    {
+        ret[2] += colors[0][2];
+        totalCount[2]++;
+    }
+    if (colors[1][2] > 0)
+    {
+        ret[2] += colors[1][2];
+        totalCount[2]++;
+    }
+
+
+    // Average the combined colors using direct indexing
+    if (totalCount[0] > 0)
+    {
+        ret[0] /= totalCount[0];
+    }
+    if (totalCount[1] > 0)
+    {
+        ret[1] /= totalCount[1];
+    }
+    if (totalCount[2] > 0)
+    {
+        ret[2] /= totalCount[2];
+    }
+    
+    ret = saturate(ret);
+    
+    return ret;
+}
+
+
+inline float2 combine(float2 a, float2 b)
+{
+    float2 ret = float2(0, 0);
+    vec2 totalCount = vec2(0, 0);
+
+    // Combine colors for each component using direct indexing
+    if (a[0] > 0)
+    {
+        ret[0] += a[0];
+        totalCount[0]++;
+    }
+    if (a[1] > 0)
+    {
+        ret[1] += a[1];
+        totalCount[1]++;
+    }
+  
+
+    if (b[0] > 0)
+    {
+        ret[0] += b[0];
+        totalCount[0]++;
+    }
+    if (b[1] > 0)
+    {
+        ret[1] += b[1];
+        totalCount[1]++;
+    }
+
+    // Average the combined colors using direct indexing
+    if (totalCount[0] > 0)
+    {
+        ret[0] /= totalCount[0];
+    }
+    if (totalCount[1] > 0)
+    {
+        ret[1] /= totalCount[1];
+    }
+  
+    return ret;
+}
+
+float getDepthFade(float depth, float hologramDepthFade)
+{
+    return saturate(1.0 - depth * hologramDepthFade);
+}
+float DepthCurve(float depth)
+{
+    // Define the depth curve parameters
+    float curveExponent = 1.5; // Exponent value
+    float curveOffset = 0.01; // Offset value
+    float curveSteepness = 2.0; // Steepness value
+    float curveRange = .80; // Range value
+
+    // Apply the depth curve
+    float depthValue = (pow(depth, curveExponent) * curveSteepness) / (1.0 + curveSteepness * (depth - curveOffset)) * curveRange;
+
+    // Return the final depth value
+    return depthValue;
+}
+float InverseDepthCurve(float depthValue)
+{
+    const float curveExponent = 1.5;
+    const float curveOffset = 0.01;
+    const float curveSteepness = 2.0;
+    const float curveRange = 0.80;
+
+    float numerator = curveSteepness * pow(depthValue * curveRange, 1.0f / curveExponent); // Simplified
+    float denominator = 1.0 + curveSteepness * (curveOffset - depthValue);
+    return numerator / denominator;
+}
+
+// Generate a Gaussian kernel
+void GenerateGaussianKernel(out float kernel[9], float sigma)
+{
+    float sum = 0.0;
+    int radius = 4; // Kernel size is 2*radius+1 = 9
+
+    for (int i = -radius; i <= radius; ++i)
+    {
+        kernel[i + radius] = Gaussian(float(i), sigma);
+        sum += kernel[i + radius];
+    }
+
+    // Normalize the kernel
+    for (i = 0; i < 9; ++i)
+    {
+        kernel[i] /= sum;
+    }
+}
+
+// Gaussian depth texture sampling function
+float GaussianDepthSample(float2 oosz, Texture2D<float> tex, float2 uv)
+{
+    float kernel[9];
+    GenerateGaussianKernel(kernel, 2);
+    float sigma = 2;
+    float depth = 0.0;
+    float weightSum = 0.0;
+    float radius = 4;
+    // Accumulate samples
+    for (int x = -radius; x <= radius; ++x)
+    {
+        for (int y = -radius; y <= radius; ++y)
+        {
+            float2 offset = float2(x, y) * oosz;
+            float sampleDepth = ClampEpsilon(tex.SampleLevel(sampleTypeMirror, uv + offset, 0).r) * DepthScale;
+            float weight = kernel[x + radius] * kernel[y + radius];
+            depth += sampleDepth * weight;
+            weightSum += weight;
+        }
+    }
+
+    // Normalize the depth value
+    return depth / weightSum;
+}
+
+
+
+// Select sigmoid steepness based on gradient magnitude
+float SelectSigmoidSteepness(float averageGradientMagnitude, float2 steepnessMinMax)
+{
+    float normalizedMagnitude = saturate(averageGradientMagnitude);
+    return lerp(steepnessMinMax.x, steepnessMinMax.y, normalizedMagnitude);
+}
+
+// Adjust steepness dynamically based on gradient magnitude
+float AdjustSteepness(float steepness, float gradientMagnitude, float threshold, float maxAdjustment)
+{
+    if (gradientMagnitude > threshold)
+    {
+        float adjustmentFactor = 1.0 - min((gradientMagnitude - threshold) / maxAdjustment, 1.0);
+        return steepness * adjustmentFactor;
+    }
+    return steepness;
+}
+
+// Compute adjusted depth curve
+float ComputeAdjustedDepthCurve(float depth, float steepness)
+{
+    return pow(depth, 1.0 / (1.0 + steepness));
+}
+
+// Function to calculate the adjusted depth using physics-based principles
+inline float ComputeAdjustedDepth(float depth, float2 gradient)
+{
+    float2 steepnessMinMax = vec2(-.1, .1);
+    //AverageGradientMagnitude avgGradMag = ComputeAverageGradientMagnitude(config.oosz, depthMap, uv, radius, sigma);
+    float steepness = SelectSigmoidSteepness((gradient.x + gradient.y) / 2, steepnessMinMax);
+    float adjustedSteepness = AdjustSteepness(steepness, length(gradient), steepnessMinMax.x, steepnessMinMax.y);
+    return ComputeAdjustedDepthCurve(depth, adjustedSteepness);
+}
+
+inline float2 GetGradient(float2 uv)
+{
+    float depth = ClampEpsilon(depthMap.SampleLevel(sampleTypeMirror, uv, 0).r) * DepthScale;
+    return vec2(ddx_fine(depth), ddy_fine(depth));
+}
+
+vec4 CrossLRUDf(vec2 oosz, Texture2D<float> tex, vec2 uv, float range)
+{
+    return vec4(
+        ClampEpsilon(tex.SampleLevel(sampleTypeMirror, uv + oosz * vec2(-range, 0), 0).r),
+        ClampEpsilon(tex.SampleLevel(sampleTypeMirror, uv + oosz * vec2(range, 0), 0).r),
+        ClampEpsilon(tex.SampleLevel(sampleTypeMirror, uv + oosz * vec2(0, -range), 0).r),
+        ClampEpsilon(tex.SampleLevel(sampleTypeMirror, uv + oosz * vec2(0, range), 0).r)
+    ) * DepthScale;
+}
+
+inline float dep2D(float2 oosz, Texture2D<float> depthMap, float2 uv)
+{
+    float2 gradient = GetGradient(uv);
+    float depthVariance = variation(ClampEpsilon(CrossLRUDf(oosz, depthMap, uv, normalRadius)));
+    float bilateralWeight = exp(-0.5 * ClampEpsilon(dot(gradient, gradient)) / ClampEpsilon(depthVariance));
+    return slerp(ClampEpsilon(depthMap.SampleLevel(sampleTypeMirror, uv, 0).r), ClampEpsilon(dot(gradient, config.gradient)), ClampEpsilon(bilateralWeight * .1)) * DepthScale;
+}
+
+
+inline float dep2D(Texture2D<float> depthMap, float2 uv)
+{
+    return dep2D(ooszDep(), depthMap, uv);
+}
+
+inline float dep2D(float2 uv)
+{
+    return dep2D(depthMap, uv);
+}
+
+// CIE 1931 Standard Observer Color Matching Functions (Sampled)
+static float3 XYZColorMatchingFunctions[81] =
+{
+    // Precalculated XYZ values for 380nm to 780nm, sampled at 5 nm intervals
+    float3(0.0014, 0.0000, 0.0065), // 380nm
+    float3(0.0042, 0.0001, 0.0201), // 385nm
+    float3(0.0136, 0.0004, 0.0645), // 390nm
+    float3(0.0435, 0.0012, 0.2074), // 395nm
+    float3(0.1344, 0.0040, 0.6456), // 400nm
+    float3(0.2839, 0.0116, 1.3856), // 405nm
+    float3(0.3483, 0.0230, 1.7471), // 410nm
+    float3(0.3362, 0.0380, 1.7721), // 415nm
+    float3(0.2908, 0.0600, 1.6692), // 420nm
+    float3(0.1954, 0.0910, 1.2876), // 425nm
+    float3(0.0956, 0.1390, 0.8129), // 430nm
+    float3(0.0320, 0.2080, 0.4652), // 435nm
+    float3(0.0049, 0.3230, 0.2720), // 440nm
+    float3(0.0093, 0.5030, 0.1582), // 445nm
+    float3(0.0633, 0.7100, 0.0782), // 450nm
+    float3(0.1655, 0.8620, 0.0422), // 455nm
+    float3(0.2904, 0.9540, 0.0203), // 460nm
+    float3(0.4334, 0.9950, 0.0087), // 465nm
+    float3(0.5945, 0.9950, 0.0039), // 470nm
+    float3(0.7621, 0.9520, 0.0021), // 475nm
+    float3(0.9163, 0.8700, 0.0017), // 480nm
+    float3(1.0263, 0.7570, 0.0011), // 485nm
+    float3(1.0622, 0.6310, 0.0008), // 490nm
+    float3(1.0026, 0.5030, 0.0003), // 495nm
+    float3(0.8544, 0.4150, 0.0002), // 500nm
+    float3(0.6424, 0.3200, 0.0001), // 505nm
+    float3(0.4479, 0.2610, 0.0000), // 510nm
+    float3(0.2835, 0.2170, 0.0000), // 515nm
+    float3(0.1649, 0.1570, 0.0000), // 520nm
+    float3(0.0874, 0.1070, 0.0000), // 525nm
+    float3(0.0468, 0.0625, 0.0000), // 530nm
+    float3(0.0227, 0.0329, 0.0000), // 535nm
+    float3(0.0114, 0.0170, 0.0000), // 540nm
+    float3(0.0058, 0.0082, 0.0000), // 545nm
+    float3(0.0029, 0.0041, 0.0000), // 550nm
+    float3(0.0014, 0.0021, 0.0000), // 555nm
+    float3(0.0007, 0.0010, 0.0000), // 560nm
+    float3(0.0003, 0.0005, 0.0000), // 565nm
+    float3(0.0002, 0.0003, 0.0000), // 570nm
+    float3(0.0001, 0.0001, 0.0000), // 575nm
+    float3(0.0000, 0.0001, 0.0000), // 580nm
+    float3(0.0000, 0.0000, 0.0000), // 585nm
+    float3(0.0000, 0.0000, 0.0000), // 590nm
+    float3(0.0000, 0.0000, 0.0000), // 595nm
+    float3(0.0000, 0.0000, 0.0000), // 600nm
+    float3(0.0000, 0.0000, 0.0000), // 605nm
+    float3(0.0000, 0.0000, 0.0000), // 610nm
+    float3(0.0000, 0.0000, 0.0000), // 615nm
+    float3(0.0000, 0.0000, 0.0000), // 620nm
+    float3(0.0000, 0.0000, 0.0000), // 625nm
+    float3(0.0000, 0.0000, 0.0000), // 630nm
+    float3(0.0000, 0.0000, 0.0000), // 635nm
+    float3(0.0000, 0.0000, 0.0000), // 640nm
+    float3(0.0000, 0.0000, 0.0000), // 645nm
+    float3(0.0000, 0.0000, 0.0000), // 650nm
+    float3(0.0000, 0.0000, 0.0000), // 655nm
+    float3(0.0000, 0.0000, 0.0000), // 660nm
+    float3(0.0000, 0.0000, 0.0000), // 665nm
+    float3(0.0000, 0.0000, 0.0000), // 670nm
+    float3(0.0000, 0.0000, 0.0000), // 675nm
+    float3(0.0000, 0.0000, 0.0000), // 680nm
+    float3(0.0000, 0.0000, 0.0000), // 685nm
+    float3(0.0000, 0.0000, 0.0000), // 690nm
+    float3(0.0000, 0.0000, 0.0000), // 695nm
+    float3(0.0000, 0.0000, 0.0000), // 700nm
+    float3(0.0000, 0.0000, 0.0000), // 705nm
+    float3(0.0000, 0.0000, 0.0000), // 710nm
+    float3(0.0000, 0.0000, 0.0000), // 715nm
+    float3(0.0000, 0.0000, 0.0000), // 720nm
+    float3(0.0000, 0.0000, 0.0000), // 725nm
+    float3(0.0000, 0.0000, 0.0000), // 730nm
+    float3(0.0000, 0.0000, 0.0000), // 735nm
+    float3(0.0000, 0.0000, 0.0000), // 740nm
+    float3(0.0000, 0.0000, 0.0000), // 745nm
+    float3(0.0000, 0.0000, 0.0000), // 750nm
+    float3(0.0000, 0.0000, 0.0000), // 755nm
+    float3(0.0000, 0.0000, 0.0000), // 760nm
+    float3(0.0000, 0.0000, 0.0000), // 765nm
+    float3(0.0000, 0.0000, 0.0000), // 770nm
+    float3(0.0000, 0.0000, 0.0000), // 775nm
+    float3(0.0000, 0.0000, 0.0000) // 780nm
+};
+
+
+
+// Convert CIE XYZ to linear sRGB 
+float3 XYZtoRGB(float3 XYZ)
+{
+    const float3x3 XYZ_TO_RGB = float3x3(
+        3.2404542, -1.5371385, -0.4985314,
+        -0.9692660, 1.8760108, 0.0415560,
+        0.0556434, -0.2040259, 1.0572252
+    );
+    return max(float3(0, 0, 0), mul(XYZ_TO_RGB, XYZ)); // Clip to ensure non-negative values
+}
+
+
+float3 GetColorFromWavelength(float wavelength, float3 wavelengthColorData[200])
+{
+    // Use a cubic spline interpolation to find the corresponding color value
+    int index = (int) ((wavelength - 0.6328) / 0.1) % 200;
+    float t = (wavelength - 0.6328) / 0.1 - index;
+    float3 c0 = wavelengthColorData[index];
+    float3 c1 = wavelengthColorData[index + 1];
+    float3 c2 = wavelengthColorData[index + 2];
+    float3 c3 = wavelengthColorData[index + 3];
+    return c0 * (-0.5 * t + 0.5 * t * t - 0.5 * t * t * t) +
+           c1 * (1.0 + t + 0.5 * t * t - 1.5 * t * t * t) +
+           c2 * (-0.5 * t + 1.5 * t * t + 0.5 * t * t * t) +
+           c3 * (0.5 * t * t - 0.5 * t * t * t);
+}
+float3 WavelengthToRGB_Spectral(float wavelength, Texture2D<float> spectralPowerDistribution)
+{
+    // Clamp wavelength to valid range
+    wavelength = clamp(wavelength, 380.0, 780.0);
+
+    // Sample the spectral power distribution across the visible spectrum
+    float3 XYZ = float3(0.0, 0.0, 0.0);
+    for (int i = 0; i < 81; ++i)
+    {
+        float lambda = 380.0 + i * 5.0; // Wavelength in nm
+        float2 uv = float2(lambda / 780.0, 0.5); // Map to [0,1] range
+        float power = dep2D(GetOosz(spectralPowerDistribution), spectralPowerDistribution, uv);
+
+        XYZ += XYZColorMatchingFunctions[i] * power;
+    }
+
+    // Convert XYZ to linear sRGB, scale, and clamp
+    float3 linearRGB = max(float3(0, 0, 0), XYZtoRGB(XYZ));
+
+    // Optional: Gamma correction for display (if not done elsewhere)
+    // float3 sRGB = pow(linearRGB, 1.0 / 2.2);
+    return saturate(linearRGB);
+}
+
+static float3 WavelengthColorData[200] =
+{
+    float3(1, 0, 0), float3(1, 0.0039, 0), float3(1, 0.0078, 0), float3(1, 0.0117, 0),
+    float3(1, 0.0156, 0), float3(1, 0.0195, 0), float3(1, 0.0234, 0), float3(1, 0.0273, 0),
+    float3(1, 0.0312, 0), float3(1, 0.0351, 0), float3(1, 0.0390, 0), float3(1, 0.0429, 0),
+    float3(1, 0.0468, 0), float3(1, 0.0507, 0), float3(1, 0.0546, 0), float3(1, 0.0585, 0),
+    float3(1, 0.0624, 0), float3(1, 0.0663, 0), float3(1, 0.0702, 0), float3(1, 0.0741, 0),
+    float3(1, 0.0780, 0), float3(1, 0.0819, 0), float3(1, 0.0858, 0), float3(1, 0.0897, 0),
+    float3(1, 0.0936, 0), float3(1, 0.0975, 0), float3(1, 0.1014, 0), float3(1, 0.1053, 0),
+    float3(1, 0.1092, 0), float3(1, 0.1131, 0), float3(1, 0.1170, 0), float3(1, 0.1209, 0),
+    float3(1, 0.1248, 0), float3(1, 0.1287, 0), float3(1, 0.1326, 0), float3(1, 0.1365, 0),
+    float3(1, 0.1404, 0), float3(1, 0.1443, 0), float3(1, 0.1482, 0), float3(1, 0.1521, 0),
+    float3(1, 0.1560, 0), float3(1, 0.1599, 0), float3(1, 0.1638, 0), float3(1, 0.1677, 0),
+    float3(1, 0.1716, 0), float3(1, 0.1755, 0), float3(1, 0.1794, 0), float3(1, 0.1833, 0),
+    float3(1, 0.1872, 0), float3(1, 0.1911, 0), float3(1, 0.1950, 0), float3(1, 0.1989, 0),
+    float3(1, 0.2028, 0), float3(1, 0.2067, 0), float3(1, 0.2106, 0), float3(1, 0.2145, 0),
+    float3(1, 0.2184, 0), float3(1, 0.2223, 0), float3(1, 0.2262, 0), float3(1, 0.2301, 0),
+    float3(1, 0.2340, 0), float3(1, 0.2379, 0), float3(1, 0.2418, 0), float3(1, 0.2457, 0),
+    float3(1, 0.2496, 0), float3(1, 0.2535, 0), float3(1, 0.2574, 0), float3(1, 0.2613, 0),
+    float3(1, 0.2652, 0), float3(1, 0.2691, 0), float3(1, 0.2730, 0), float3(1, 0.2769, 0),
+    float3(1, 0.2808, 0), float3(1, 0.2847, 0), float3(1, 0.2886, 0), float3(1, 0.2925, 0),
+    float3(1, 0.2964, 0), float3(1, 0.3003, 0), float3(1, 0.3042, 0), float3(1, 0.3081, 0),
+    float3(1, 0.3120, 0), float3(1, 0.3159, 0), float3(1, 0.3198, 0), float3(1, 0.3237, 0),
+    float3(1, 0.3276, 0), float3(1, 0.3315, 0), float3(1, 0.3354, 0), float3(1, 0.3393, 0),
+    float3(1, 0.3432, 0), float3(1, 0.3471, 0), float3(1, 0.3510, 0), float3(1, 0.3549, 0),
+    float3(1, 0.3588, 0), float3(1, 0.3627, 0), float3(1, 0.3666, 0), float3(1, 0.3705, 0),
+    float3(1, 0.3744, 0), float3(1, 0.3783, 0), float3(1, 0.3822, 0), float3(1, 0.3861, 0),
+    float3(1, 0.3900, 0), float3(1, 0.3939, 0), float3(1, 0.3978, 0), float3(1, 0.4017, 0),
+    float3(1, 0.4056, 0), float3(1, 0.4095, 0), float3(1, 0.4134, 0), float3(1, 0.4173, 0),
+    float3(1, 0.4212, 0), float3(1, 0.4251, 0), float3(1, 0.4290, 0), float3(1, 0.4329, 0),
+    float3(1, 0.4368, 0), float3(1, 0.4407, 0), float3(1, 0.4446, 0), float3(1, 0.4485, 0),
+    float3(1, 0.4524, 0), float3(1, 0.4563, 0), float3(1, 0.4602, 0), float3(1, 0.4641, 0),
+    float3(1, 0.4680, 0), float3(1, 0.4719, 0), float3(1, 0.4758, 0), float3(1, 0.4797, 0), float3(1, 0.4836, 0),
+    float3(1, 0.4875, 0), float3(1, 0.4914, 0), float3(1, 0.4953, 0), float3(1, 0.4992, 0),
+    float3(1, 0.5031, 0), float3(1, 0.5070, 0), float3(1, 0.5109, 0), float3(1, 0.5148, 0),
+    float3(1, 0.5187, 0), float3(1, 0.5226, 0), float3(1, 0.5265, 0), float3(1, 0.5304, 0),
+    float3(1, 0.5343, 0), float3(1, 0.5382, 0), float3(1, 0.5421, 0), float3(1, 0.5460, 0),
+    float3(1, 0.5499, 0), float3(1, 0.5538, 0), float3(1, 0.5577, 0), float3(1, 0.5616, 0),
+    float3(1, 0.5655, 0), float3(1, 0.5694, 0), float3(1, 0.5733, 0), float3(1, 0.5772, 0),
+    float3(1, 0.5811, 0), float3(1, 0.5850, 0), float3(1, 0.5889, 0), float3(1, 0.5928, 0),
+    float3(1, 0.5967, 0), float3(1, 0.6006, 0), float3(1, 0.6045, 0), float3(1, 0.6084, 0),
+    float3(1, 0.6123, 0), float3(1, 0.6162, 0), float3(1, 0.6201, 0), float3(1, 0.6240, 0),
+    float3(1, 0.6279, 0), float3(1, 0.6318, 0), float3(1, 0.6357, 0), float3(1, 0.6396, 0),
+    float3(1, 0.6435, 0), float3(1, 0.6474, 0), float3(1, 0.6513, 0), float3(1, 0.6552, 0),
+    float3(1, 0.6591, 0), float3(1, 0.6630, 0), float3(1, 0.6669, 0), float3(1, 0.6708, 0),
+    float3(1, 0.6747, 0), float3(1, 0.6786, 0), float3(1, 0.6825, 0), float3(1, 0.6864, 0),
+    float3(1, 0.6903, 0), float3(1, 0.6942, 0), float3(1, 0.6981, 0), float3(1, 0.7020, 0),
+    float3(0.9961, 0.70196078431, 0), float3(0.9922, 0.70192156863, 0), float3(0.9882, 0.70188235294, 0),
+    float3(0.9843, 0.70184313725, 0), float3(0.9804, 0.70180392157, 0), float3(0.9765, 0.70176470588, 0), float3(0.9725, 0.70172549020, 0),
+    float3(0.9686, 0.70168627451, 0), float3(0.9647, 0.70164705882, 0), float3(0.9608, 0.70160784314, 0), float3(0.9569, 0.70156862745, 0),
+    float3(0.9529, 0.70152941176, 0), float3(0.9490, 0.70149019608, 0), float3(0.9451, 0.70145098039, 0), float3(0.9412, 0.70141176471, 0),
+    float3(0.9373, 0.70137254902, 0), float3(0.9333, 0.70133333333, 0), float3(0.9294, 0.70129411765, 0), float3(0.9255, 0.70125490196, 0)
+};
+
+
+
+float4 WavelengthSpectrumPS(Texture2D<float4> diffuse, Texture2D<float3> normal, Texture2D<float> depth,
+    float2 uv)
+{
+    // Sample the diffraction pattern texture
+    float4 diffraction = tex2D(diffuse, uv);
+
+    // Calculate the wavelength from the texture coordinates
+    float wavelength = 0.6328 + (uv.x * 0.1); // 632.8nm to 732.8nm spectrum
+
+    // Use a high-accuracy wavelength-color mapping function
+    float3 color = mir2D(diffuse, uv).xyz;
+
+    // Apply a spectral power distribution correction
+    color *= GetSPDCorrection(wavelength);
+
+    // Modulate the color with the diffraction pattern
+    color *= diffraction.rgb;
+
+    return float4(color, 1);
+}
+
+
+
+float3 GaussianSample(float2 oosz, Texture2D<float4> tex, float2 uv, Texture2D<float> depthMap, float focusDepth)
+{
+    float kernel[9];
+    GenerateGaussianKernel(kernel, 2);
+    float sigma = 2;
+    float3 color = 0.0;
+    float weightSum = 0.0;
+    float radius = 4;
+    float focus = abs(focusDepth - dep2D(uv));
+    if (focus < .2)
+    {
+        return mir2D(tex, uv).xyz;
+    }
+    else if (focus < .3)
+    {
+        radius = 1;
+    }
+    else if (focus < .5)
+    {
+        radius = 2;
+    }
+    else if (focus < .7)
+    {
+        radius = 3;
+    }
+    
+    [unroll]
+    for (int x = -radius; x <= radius; ++x)
+    {
+        [unroll]
+        for (int y = -radius; y <= radius; ++y)
+        {
+            float2 offset = float2(x, y) * oosz;
+            float3 sampleColor = mir2D(tex, uv + offset).xyz;
+            float depth = dep2D(depthMap, uv + offset);
+            float focus = length((uv + float2(x, y) * oosz) - .5);
+            float weight = kernel[x + radius] * kernel[y + radius] * focus;
+            color = color + sampleColor * weight;
+            weightSum += weight;
+        }
+    }
+    
+    return slerp(mir2D(tex, uv).rgb, color / weightSum, length(uv - .5) * focus);
+}
+
+
+
+float2 HeatHaze(float2 oosz, Texture2D<float> tex, float2 uv, float time, float xMul, float yMul, float timeMul, float finalMul)
+{
+    return (cos(uv.x * xMul * time * timeMul) + sin(uv.y * yMul * time * timeMul)) / 4 * finalMul * dep2D(tex, uv) * oosz;
+}
+
+float3 HeatHaze(float2 oosz, Texture2D tex, float2 uv, float time, float xMul, float yMul, float timeMul, float finalMul)
+{
+    return mir2D(tex, uv + HeatHaze(oosz, tex, uv, time, xMul, yMul, timeMul, finalMul).xy).rgb;
+}
+
+
+// Helper function to map a value from one range to another with scaling and offset
+inline float remap(float value, float inMin, float inMax, float outMin, float outMax, float outOffset, float outScale)
+{
+    float remapped = outMin + (value - inMin) * (outMax - outMin) / (inMax - inMin);
+    return (remapped + outOffset) * outScale;
+}
+inline float4 remap(float4 value, float4 inMin, float4 inMax, float4 outMin, float4 outMax, float4 outOffset, float4 outScale)
+{
+    float4 remapped = outMin + (value - inMin) * (outMax - outMin) / (inMax - inMin);
+    return (remapped + outOffset) * outScale;
+}
+// Logistic function (centered around 0, range [-1, 1])
+inline float logistic(float x, float steepness)
+{
+    return 2.0f / (1.0f + exp(-2.0f * steepness * x)) - 1.0f;
+}
+inline float4 logistic(float4 x, float4 steepness)
+{
+    return 2.0f / (1.0f + exp(-2.0f * steepness * x)) - 1.0f;
+}
+inline float3 logistic(float3 x, float3 steepness)
+{
+    return 2.0f / (1.0f + exp(-2.0f * steepness * x)) - 1.0f;
+}
+inline float2 logistic(float2 x, float2 steepness)
+{
+    return 2.0f / (1.0f + exp(-2.0f * steepness * x)) - 1.0f;
+}
+
+inline float sigmoid1(float x, float steepness, float nearValue, float farValue, float offset, float scale)
+{
+    float normalized = logistic(x, steepness);
+    return remap(normalized, SIGMOID_NEAR, SIGMOID_FAR, nearValue, farValue, offset, scale);
+}
+
+inline float4 sigmoid4(float4 x, float4 steepness, float4 nearValue, float4 farValue, float4 offset, float4 scale)
+{
+    float4 normalized = logistic(x, steepness);
+    return remap(normalized, SIGMOID_NEAR, SIGMOID_FAR, nearValue, farValue, offset, scale);
+}
+
+inline float sigmoid1(float x, float steepness, float offset, float scale)
+{
+    return sigmoid1(x, steepness, SIGMOID_NEAR, SIGMOID_FAR, offset, scale);
+}
+inline float2 sigmoid2(float2 x, float2 steepness, float2 offset, float2 scale)
+{
+    return float2(sigmoid1(x.x, steepness.x, SIGMOID_NEAR, SIGMOID_FAR, offset.x, scale.x),
+        sigmoid1(x.y, steepness.y, SIGMOID_NEAR, SIGMOID_FAR, offset.y, scale.y));
+}
+inline float3 sigmoid3(float3 x, float3 steepness, float3 offset, float3 scale)
+{
+    return float3(sigmoid1(x.x, steepness.x, SIGMOID_NEAR, SIGMOID_FAR, offset.x, scale.x),
+        sigmoid1(x.y, steepness.y, SIGMOID_NEAR, SIGMOID_FAR, offset.y, scale.y),
+        sigmoid1(x.z, steepness.z, SIGMOID_NEAR, SIGMOID_FAR, offset.z, scale.z));
+}
+inline float4 sigmoid4(float4 x, float4 steepness, float4 offset, float4 scale)
+{
+    
+    return sigmoid4(x, steepness, SIGMOID_NEAR4, SIGMOID_FAR4, offset, scale);
+}
+
+
+
+
+
+// Vectorized sigmoid function with intrinsic math
+inline float sigmoid(float x, float steepness, float nearValue, float farValue, float offset, float scale)
+{
+    float normalized = logistic(x, steepness);
+    return remap(normalized, 0.0f, 1.0f, nearValue, farValue, offset, scale);
+}
+
+inline float4 sigmoid(float4 x, float4 steepness, float4 nearValue, float4 farValue, float4 offset, float4 scale)
+{
+    float4 normalized = logistic(x, steepness);
+    return remap(normalized, .0f, 1.0f, nearValue, farValue, offset, scale);
+}
+
+// Sigmoid function
+inline float sigmoid(float x, float slope, float nearRange, float farRange)
+{
+    return 1.0 / (1.0 + exp(-slope * (x - nearRange))) - 1.0 / (1.0 + exp(-slope * (x - farRange)));
+}
+
+// Helper functions optimized through constant folding
+inline float2 sigmoid(float2 x, float2 steepness)
+{
+    return float2(sigmoid(x.x, steepness.x, SIGMOID_NEAR, SIGMOID_FAR, 0, 1),
+                  sigmoid(x.y, steepness.y, SIGMOID_NEAR, SIGMOID_FAR, 0, 1));
+}
+
+inline float3 sigmoid(float3 x, float3 steepness)
+{
+    return float3(sigmoid(x.x, steepness.x, SIGMOID_NEAR, SIGMOID_FAR, 0, 1),
+                  sigmoid(x.y, steepness.y, SIGMOID_NEAR, SIGMOID_FAR, 0, 1),
+                  sigmoid(x.z, steepness.z, SIGMOID_NEAR, SIGMOID_FAR, 0, 1));
+}
+
+inline float4 sigmoid(float4 x, float4 steepness)
+{
+    return float4(sigmoid(x.x, steepness.x, SIGMOID_NEAR, SIGMOID_FAR, 0, 1),
+                  sigmoid(x.y, steepness.y, SIGMOID_NEAR, SIGMOID_FAR, 0, 1),
+                  sigmoid(x.z, steepness.z, SIGMOID_NEAR, SIGMOID_FAR, 0, 1),
+                  sigmoid(x.w, steepness.w, SIGMOID_NEAR, SIGMOID_FAR, 0, 1));
+}
+
+
+
+
+
+inline float3 SelectSigmoidSteepness3D(float3 averageGradientMagnitude, float2 steepnessMinMax)
+{
+    // Clamp and normalize the gradient magnitude
+    float3 normalizedMagnitude = saturate(averageGradientMagnitude);
+
+    // Lerp between minimum and maximum steepness based on normalized gradient magnitude
+    return vec3(slerp(steepnessMinMax.x, steepnessMinMax.y, normalizedMagnitude.x),
+        slerp(steepnessMinMax.x, steepnessMinMax.y, normalizedMagnitude.y),
+    slerp(steepnessMinMax.x, steepnessMinMax.y, normalizedMagnitude.z));
+}
+
+inline float2 GetModulation(Texture2D<float> depthMap, float2 uv)
+{
+    // Sample the depth map
+    float depth = dep2D(depthMap, uv);
+
+    // Calculate the depth gradient
+    float2 depthGradient = float2(ddx(depth), ddy(depth));
+
+    float nearSlope = -0.1;
+    float farSlope = 0.1;
+    float nearRange = 0.2;
+    float farRange = 0.8;
+
+    // Calculate the sigmoid slope based on the depth gradient
+    float sigmoidSlopeX = lerp(nearSlope, farSlope, saturate(depthGradient.x));
+    float sigmoidSlopeY = lerp(nearSlope, farSlope, saturate(depthGradient.y));
+
+    // Apply the sigmoid function to the depth gradient components
+    float2 sigmoidCurve = float2(
+        sigmoid(saturate(depthGradient.x), sigmoidSlopeX, nearRange, farRange),
+        sigmoid(saturate(depthGradient.y), sigmoidSlopeY, nearRange, farRange)
+    );
+
+    // Clamp the output to a small epsilon value for stability
+    sigmoidCurve = clamp(sigmoidCurve, -0.2, 0.2);
+
+    return sigmoidCurve;
+}
+
+
+
+
+float XCrossLRUDfAvg(float2 oosz, Texture2D<float> tex, float2 uv, float range)
+{
+    range = min(4, max(1, range));
+    float ret = 0;
+    float weightTotal = 0;
+    for (int x = -range; x <= range; x += 2)
+    {
+        for (int y = -range; y <= range; y += 2)
+        {
+            // Calculate weight based on distance from center pixel
+            float weight = 1.0 / (1.0 + sqrt((x * oosz.x) * (x * oosz.x) + (y * oosz.y) * (y * oosz.y)));
+            // Check neighboring pixels within the range
+            float depth = dep2D(oosz, tex, uv + vec2(x, y) * oosz);
+// Accumulate the weighted depth value
+            ret += depth * weight;
+            weightTotal += weight;
+            
+        }
+    }
+// Normalize by total weight
+    ret = (ret / weightTotal);
+    return ret;
+}
+
+
+
+
+float CrossLRUDfAvg(vec2 oosz, Texture2D<float> tex, vec2 uv, float range)
+{
+    vec4 v = CrossLRUDf(oosz, tex, uv, range);
+    return slerp(dep2D(oosz, tex, uv), (v.x + v.y + v.z + v.w) / 4.0, .35);
+}
+
+inline vec3 normal2Dn(Texture2D<float3> tex, vec2 uv)
+{
+    return normalize(ClampEpsilon(tex.SampleLevel(sampleTypeMirror, uv, 0).xyz) * 2 - 1);
+}
+
+inline float3 normal2D(Texture2D<float3> tex, float2 uv)
+{
+    return normal2Dn(tex, uv);
+}
+
+
+inline vec3 normal2D(vec2 uv)
+{
+    return normal2D(normalMap, uv);
+
+}
+
+
+float3 GetNormal2(float2 oosz, Texture2D<float> depthMap, float2 uv, float dist, float2 modulation)
+{
+    float centerDepth = dep2D(oosz, depthMap, uv);
+    float2 tex1 = uv - float2(oosz.x, 0) * dist;
+    float2 tex2 = uv - float2(0.0, oosz.y) * dist;
+    float2 tex3 = uv + float2(oosz.x, 0) * dist;
+    float2 tex4 = uv + float2(0.0, oosz.y) * dist;
+    
+    float xDepth = dep2D(oosz, depthMap, tex1);
+    float yDepth = dep2D(oosz, depthMap, tex2);
+
+    // Compute view-space positions
+    float3 centerPos = float3(uv, centerDepth);
+    float3 xPos = float3(tex1, xDepth);
+    float3 yPos = float3(tex2, yDepth);
+
+    // Compute view-space normal
+    float3 viewNormal = (cross(normalize(yPos - centerPos), normalize(xPos - centerPos)));
+    return normalize(viewNormal * vec3(1, 1, -1));
+}
+
+
+void CrossLRUDf(vec2 oosz, Texture2D<float> tex, vec2 uv, float radius, float2 modulation, out float l, out float r, out float u, out float d)
+{
+    l = dep2D(oosz, tex, uv + vec2(-1, 0) * radius * modulation);
+    r = dep2D(oosz, tex, uv + vec2(1, 0) * radius * modulation);
+    u = dep2D(oosz, tex, uv + vec2(0, -1) * radius * modulation);
+    d = dep2D(oosz, tex, uv + vec2(0, 1) * radius * modulation);
+}
+
+float4 XCrossLRUDAvg_RGB2(vec2 oosz, Texture2D tex, vec2 uv)
+{
+    float4 xl = mir2D(tex, uv + oosz * vec2(-1.0, -1.0));
+    float4 xr = mir2D(tex, uv + oosz * vec2(1.0, 1.0));
+    float4 xu = mir2D(tex, uv + oosz * vec2(1.0, -1.0));
+    float4 xdr = mir2D(tex, uv + oosz * vec2(-1.0, -1.0));
+    float4 l = mir2D(tex, uv + oosz * vec2(-1.0, -1.0));
+    float4 r = mir2D(tex, uv + oosz * vec2(1.0, 1.0));
+    float4 u = mir2D(tex, uv + oosz * vec2(1.0, -1.0));
+    float4 dr = mir2D(tex, uv + oosz * vec2(-1.0, -1.0));
+    
+    return float4(slerp(xl.r + xr.r + xu.r + xdr.r / 4, l.r + r.r + u.r + dr.r / 4, .75),
+                  slerp(xl.g + xr.g + xu.g + xdr.g / 4, l.g + r.g + u.g + dr.g / 4, .75),
+                  slerp(xl.b + xr.b + xu.b + xdr.b / 4, l.b + r.b + u.b + dr.b / 4, .75),
+                  slerp(xl.a + xr.a + xu.a + xdr.a / 4, l.a + r.a + u.a + dr.a / 4, .75));
+}
+
+float4 XCrossLRUDAvg_RGB2(vec2 oosz, Texture2D tex, vec2 uv, vec2 radius, float2 depthGradient)
+{
+    float4 xl = mir2D(tex, uv + oosz * vec2(-1.0, -1.0) * radius * depthGradient);
+    float4 xr = mir2D(tex, uv + oosz * vec2(1.0, 1.0) * radius * depthGradient);
+    float4 xu = mir2D(tex, uv + oosz * vec2(1.0, -1.0) * radius * depthGradient);
+    float4 xdr = mir2D(tex, uv + oosz * vec2(-1.0, -1.0) * radius * depthGradient);
+    float4 l = mir2D(tex, uv + oosz * vec2(-1.0, -1.0) * radius * depthGradient);
+    float4 r = mir2D(tex, uv + oosz * vec2(1.0, 1.0) * radius * depthGradient);
+    float4 u = mir2D(tex, uv + oosz * vec2(1.0, -1.0) * radius * depthGradient);
+    float4 dr = mir2D(tex, uv + oosz * vec2(-1.0, -1.0) * radius * depthGradient);
+    
+    return float4(slerp(xl.r + xr.r + xu.r + xdr.r / 4, l.r + r.r + u.r + dr.r / 4, .75),
+                  slerp(xl.g + xr.g + xu.g + xdr.g / 4, l.g + r.g + u.g + dr.g / 4, .75),
+                  slerp(xl.b + xr.b + xu.b + xdr.b / 4, l.b + r.b + u.b + dr.b / 4, .75),
+                  slerp(xl.a + xr.a + xu.a + xdr.a / 4, l.a + r.a + u.a + dr.a / 4, .75));
+}
+
+void XCrossLRUD_RGB2(vec2 oosz, Texture2D tex, vec2 uv, vec2 radius, float2 depthGradient, out vec4 l, out vec4 r, out vec4 u, out vec4 dr, out vec4 xl, out vec4 xr, out vec4 xu, out vec4 xdr)
+{
+    xl = mir2D(tex, uv + oosz * vec2(-1.0, -1.0) * radius * depthGradient);
+    xr = mir2D(tex, uv + oosz * vec2(1.0, 1.0) * radius * depthGradient);
+    xu = mir2D(tex, uv + oosz * vec2(1.0, -1.0) * radius * depthGradient);
+    xdr = mir2D(tex, uv + oosz * vec2(-1.0, -1.0) * radius * depthGradient);
+    l = mir2D(tex, uv + oosz * vec2(-1.0, -1.0) * radius * depthGradient);
+    r = mir2D(tex, uv + oosz * vec2(1.0, 1.0) * radius * depthGradient);
+    u = mir2D(tex, uv + oosz * vec2(1.0, -1.0) * radius * depthGradient);
+    dr = mir2D(tex, uv + oosz * vec2(-1.0, -1.0) * radius * depthGradient);
+}
+
+void XLRUD_RGB2(vec2 oosz, Texture2D tex, vec2 uv, vec2 radius, float2 depthGradient, out vec4 l, out vec4 r, out vec4 u, out vec4 dr)
+{
+    l = mir2D(tex, uv + oosz * vec2(-1.0, -1.0) * radius * depthGradient);
+    r = mir2D(tex, uv + oosz * vec2(1.0, 1.0) * radius * depthGradient);
+    u = mir2D(tex, uv + oosz * vec2(1.0, -1.0) * radius * depthGradient);
+    dr = mir2D(tex, uv + oosz * vec2(-1.0, -1.0) * radius * depthGradient);
+}
+
+void CrossLRUD_RGB2(Texture2D tex, vec2 oosz, vec2 uv, vec2 radius, float2 depthGradient, out vec4 l, out vec4 r, out vec4 u, out vec4 dr)
+{
+    l = mir2D(tex, uv + oosz * vec2(-1.0, 0.0) * radius * depthGradient);
+    r = mir2D(tex, uv + oosz * vec2(1.0, 0.0) * radius * depthGradient);
+    u = mir2D(tex, uv + oosz * vec2(0.0, -1.0) * radius * depthGradient);
+    dr = mir2D(tex, uv + oosz * vec2(0.0, 1.0) * radius * depthGradient);
+}
+
+vec4 XLRUDf(vec2 oosz, Texture2D<float> tex, vec2 uv, float range, float2 depthGradient)
+{
+    return vec4(
+        dep2D(oosz, tex, uv + oosz * float2(-range, -range)),
+        dep2D(oosz, tex, uv + oosz * float2(range, -range)),
+        dep2D(oosz, tex, uv + oosz * float2(-range, range)),
+        dep2D(oosz, tex, uv + oosz * float2(range, range)));
+}
+vec4 XLRUDf(vec2 oosz, Texture2D tex, vec2 uv, float range, float2 depthGradient)
+{
+    return vec4(
+        mir2D(tex, uv + oosz * float2(-range, -range) * depthGradient).r,
+        mir2D(tex, uv + oosz * float2(range, -range) * depthGradient).r,
+        mir2D(tex, uv + oosz * float2(-range, range) * depthGradient).r,
+        mir2D(tex, uv + oosz * float2(range, range) * depthGradient).r
+    );
+}
+
+
+float XLRUDfAvg(float2 oosz, Texture2D<float> tex, float2 uv, float range, float2 depthGradient)
+{
+    vec4 v = XLRUDf(oosz, tex, uv, range, depthGradient);
+    return saturate((v.x + v.y + v.z + v.w) / 4.0f);
+}
+
+
+
+inline float nearDepth()
+{
+    return config.depth;
+}
+
+inline float farDepth()
+{
+    return config.invDepth;
+}
+
+
+    // Fresnel-Schlick Reflectivity
+float3 FresnelSchlickBaseReflectivity(float3 base, float3 intensity, float3 metallic)
+{
+    return float3(slerp(base.x, intensity.x, metallic.x),
+                  slerp(base.y, intensity.y, metallic.y),
+                  slerp(base.z, intensity.z, metallic.z));
+}
+
+
+
+vec2 GetGradientBetween(vec2 oosz, vec2 uv1, vec2 uv2)
+{
+    vec2 dir = uv2 - uv1;
+    float pixelDistance = length(dir / oosz); // Distance in pixels
+    
+    // Optimize sampling based on pixel distance
+    const float minPixelDistance = 0.5;
+    int sampleCount = max(1, min(10, int(ceil(pixelDistance / minPixelDistance))));
+
+    vec2 gradientSum = vec2(0.0, 0.0);
+    float totalDepthChange = 0.0;
+    float prevDepth = dep2D(oosz, depthMap, uv1);
+
+    for (int i = 1; i <= sampleCount; ++i)
+    {
+        float t = float(i) / float(sampleCount);
+        vec2 sampleUV = slerp(uv1, uv2, t);
+        float currentDepth = dep2D(oosz, depthMap, sampleUV);
+
+        // Calculate depth change and accumulate
+        float depthChange = currentDepth - prevDepth;
+        totalDepthChange += depthChange;
+
+        // Weighted gradient contribution
+        gradientSum += depthChange * (dir / pixelDistance);
+
+        prevDepth = currentDepth;
+    }
+
+    // Normalize the gradient by the total depth change
+    if (totalDepthChange != 0.0)
+    {
+        gradientSum /= totalDepthChange;
+    }
+
+    return gradientSum;
+}
+
+float3 HueToRGB(float hue)
+{
+    float r = abs(hue * 6.0 - 3.0) - 1.0;
+    float g = 2.0 - abs(hue * 6.0 - 2.0);
+    float b = 2.0 - abs(hue * 6.0 - 4.0);
+    return saturate(float3(r, g, b));
+}
+float RGBtoHue(float3 rgb)
+{
+    float M = max(max(rgb.r, rgb.g), rgb.b);
+    float m = min(min(rgb.r, rgb.g), rgb.b);
+    float C = M - m; // Chroma
+
+    float hue = 0.0; // Initialize hue
+
+    if (C != 0)
+    {
+        if (M == rgb.r)
+        {
+            hue = fmod(((rgb.g - rgb.b) / C), 6.0);
+        }
+        else if (M == rgb.g)
+        {
+            hue = ((rgb.b - rgb.r) / C) + 2.0;
+        }
+        else
+        {
+            hue = ((rgb.r - rgb.g) / C) + 4.0;
+        }
+        hue *= 60.0;
+        if (hue < 0.0)
+            hue += 360.0;
+    }
+
+    return hue / 360.0; // Normalize to [0, 1]
+}
+
+
+float ApplyGammaCorrection(float colorComponent)
+{
+    if (colorComponent > 0.04045f)
+    {
+        return pow((colorComponent + 0.055f) / 1.055f, 2.4f);
+    }
+    else
+    {
+        return colorComponent / 12.92f;
+    }
+}
+
+
+float3 CreateRainbowSpectrum(float2 uv, float3 viewDir)
+{
+    // Adjust the hue based on the viewing direction
+    float hueShift = atan2(viewDir.y, viewDir.x) / (2.0 * PI);
+
+    // Calculate the base hue from the uv coordinates
+    float baseHue = uv.x + uv.y;
+
+    // Combine the base hue with the directional hue shift
+    float finalHue = frac(baseHue + hueShift);
+
+    // Convert the final hue to an RGB color
+    return HueToRGB(finalHue);
+}
+
+float3 rgb2hsv_eps(float3 c)
+{
+    float4 K = float4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+    float4 p = slerp(float4(c.bg, K.wz), float4(c.gb, K.xy), step(c.b, c.g));
+    float4 q = slerp(float4(p.xyw, c.r), float4(c.r, p.yzx), step(p.x, c.r));
+    float d = q.x - min(q.w, q.y);
+    float e = 1.0e-10;
+    float3 hsv = float3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e + 1.0e-6), q.x);
+
+    // Add a smoothstep function to gradually transition to black
+    float lum = hsv.z * 2.0 - 1.0; // Map value to -1..1 range
+    lum = smoothstep(-1.0, 0.0, lum); // Gradually transition to black
+    hsv.z = lum * 0.5 + 0.5; // Map back to 0..1 range
+
+    return hsv;
+}
+
+float3 hsv2rgb_eps(float3 c)
+{
+    float4 K = float4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+    float3 p = abs(frac(c.xxx + K.xyz) * 6.0 - K.www);
+    float3 rgb = c.z * slerp(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y + 1.0e-6);
+
+    // Add a smoothstep function to gradually transition to black
+    float lum = rgb.x * 2.0 - 1.0; // Map value to -1..1 range
+    lum = smoothstep(-1.0, 0.0, lum); // Gradually transition to black
+    rgb.x = lum * 0.5 + 0.5; // Map back to 0..1 range
+
+    return rgb;
+}
+
+float3 rgb2hsv(float3 c)
+{
+    float4 K = float4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+    float4 p = slerp(float4(c.bg, K.wz), float4(c.gb, K.xy), step(c.b, c.g));
+    float4 q = slerp(float4(p.xyw, c.r), float4(c.r, p.yzx), step(p.x, c.r));
+    float d = q.x - min(q.w, q.y);
+    float e = 1.0e-10;
+    float3 hsv = float3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e + 1.0e-6), q.x);
+
+    // Add a smoothstep function to gradually transition to black
+    float lum = hsv.z * 2.0 - 1.0; // Map value to -1..1 range
+    lum = smoothstep(-1.0, 0.0, lum); // Gradually transition to black
+    hsv.z = lum * 0.5 + 0.5; // Map back to 0..1 range
+
+    return hsv;
+}
+
+float3 hsv2rgb(float3 c)
+{
+    float4 K = float4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+    float3 p = abs(frac(c.xxx + K.xyz) * 6.0 - K.www);
+    float3 rgb = c.z * slerp(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y + 1.0e-6);
+
+    // Add a smoothstep function to gradually transition to black
+    float lum = rgb.x * 2.0 - 1.0; // Map value to -1..1 range
+    lum = smoothstep(-1.0, 0.0, lum); // Gradually transition to black
+    rgb.x = lum * 0.5 + 0.5; // Map back to 0..1 range
+
+    // Add a smoothstep function to gradually transition to white
+    lum = rgb.x * 2.0 - 1.0; // Map value to -1..1 range
+    lum = smoothstep(0.0, 1.0, lum); // Gradually transition to white
+    rgb.x = lum * 0.5 + 0.5; // Map back to 0..1 range
+
+    return rgb;
+}
+
+float4 HSVtoRGB(float4 hsv)
+{
+    float h = hsv.x;
+    float s = hsv.y;
+    float v = hsv.z;
+
+    if (s == 0.0f)
+        return float4(v, v, v, 1.0);
+
+    h /= 60.0f;
+    int i = int(floor(h));
+    float f = h - float(i);
+    float p = v * (1.0f - s);
+    float q = v * (1.0f - s * f);
+    float t = v * (1.0f - s * (1.0f - f));
+
+    if (i == 0)
+        return vec4(v, t, p, 1.0);
+    if (i == 1)
+        return vec4(q, v, p, 1.0);
+    if (i == 2)
+        return vec4(p, v, t, 1.0);
+    if (i == 3)
+        return vec4(p, q, v, 1.0);
+    if (i == 4)
+        return vec4(t, p, v, 1.0);
+
+    return vec4(v, p, q, 1.0);
+}
+
+vec3 RGBtoHSV(vec3 rgb)
+{
+    float R = rgb.r;
+    float G = rgb.g;
+    float B = rgb.b;
+    float maxC = max(R, max(G, B));
+    float minC = min(R, min(G, B));
+    float delta = maxC - minC;
+
+    float H = 0;
+    if (delta == 0)
+    {
+        H = 0;
+    }
+    else if (maxC == R)
+    {
+        H = 60 * (fmod(((G - B) / delta), 6));
+    }
+    else if (maxC == G)
+    {
+        H = 60 * (((B - R) / delta) + 2);
+    }
+    else if (maxC == B)
+    {
+        H = 60 * (((R - G) / delta) + 4);
+    }
+
+    float S = (maxC == 0) ? 0 : (delta / maxC);
+    float V = maxC;
+
+    return float3(H, S, V);
+}
+
+inline vec4 rotateHue2(vec4 colorRGB, float angle)
+{
+    vec4 hsv = vec4(rgb2hsv_eps(saturate(colorRGB.xyz)), 1);
+    hsv.x += angle;
+    hsv.x = fmod(hsv.x, 360.0f);
+    return float4(saturate(hsv2rgb_eps(hsv.xyz)), 1);
+}
+
+inline vec4 rotateHue(vec4 colorRGB, float angle)
+{
+    vec4 hsv = vec4(RGBtoHSV(saturate(colorRGB.xyz)), 1); // Convert to HSV
+    hsv.x += angle; // Rotate the hue
+    hsv.x = fmod(hsv.x, 360.0f); // Wrap the hue if it goes out of bounds
+    return saturate(HSVtoRGB(hsv));
+}
+inline vec3 rotateHue(vec3 colorRGB, float angle)
+{
+    vec4 hsv = vec4(RGBtoHSV(saturate(colorRGB)), 1); // Convert to HSV
+    hsv.x += angle; // Rotate the hue
+    hsv.x = fmod(hsv.x, 360.0f); // Wrap the hue if it goes out of bounds
+    return saturate(HSVtoRGB(hsv).rgb);
+}
+inline float Luminance(float3 color)
+{
+    return dot(color, float3(0.2126, 0.7152, 0.0722)); // Standard luminance calculation from RGB
+}
+
+
+float3 lerpSigmoidLuminocity(float3 baseColor, float3 blendColor1, float3 blendColor2, float alpha, float beta)
+{
+    float baseLuminance = Luminance(baseColor);
+    float blendLuminance1 = Luminance(blendColor1);
+    float blendLuminance2 = Luminance(blendColor2);
+
+    // Advanced sigmoid for non-linear mix ratio
+    float mixRatio = sigmoid((blendLuminance1 - blendLuminance2) / (1.0 + abs(blendLuminance1 - blendLuminance2)), alpha, beta, 1);
+    float3 mixedColor = slerp(blendColor1, blendColor2, mixRatio);
+
+    // Adjust luminance non-linearly
+    float mixedLuminance = Luminance(mixedColor);
+    float luminanceAdjustment = sigmoid(baseLuminance / mixedLuminance, alpha, beta, 1);
+    mixedColor *= luminanceAdjustment;
+
+    return mixedColor;
+}
+
+
+float3 HueShift(float3 color, float hue)
+{
+    // Use a rotation matrix to shift the hue of the color
+    const float3 k = float3(0.57735, 0.57735, 0.57735); // 1 / sqrt(3)
+    float cosAngle = cos(hue);
+    float sinAngle = sin(hue);
+    return color * cosAngle + cross(k, color) * sinAngle + k * dot(k, color) * (1.0 - cosAngle);
+}
+
+
+float RefractionIndex(float interactionStrength)
+{
+    return 1.0 + sigmoid(interactionStrength, 0.5, 15.0, 1) * 0.3; // Adjust refraction index
+}
+
+
+float3 FresnelSchlick(float3 F0, float cosTheta, float3 fresnelPower)
+{
+    F0 = ClampEpsilon11(F0);
+    return F0 + (1.0 - F0) * pow(ClampEpsilon(1.0 - cosTheta), fresnelPower);
+}
+
+float3 FresnelSchlick(float3 F0, float3 H, float3 N, float3 power)
+{
+    return FresnelSchlick(F0, dot(H, N), power);
+}
+
+
+float FresnelSchlick(float refractiveIndex, float surroundingRefractiveIndex, float cosIncidenceAngle, float power)
+{
+    float F0 = (refractiveIndex * refractiveIndex - surroundingRefractiveIndex * surroundingRefractiveIndex) / (refractiveIndex * refractiveIndex + surroundingRefractiveIndex * surroundingRefractiveIndex);
+    return F0 + (1 - F0) * pow(1 - cosIncidenceAngle, power);
+}
+
+vec4 Fresnel(vec4 cosTheta)
+{
+    return exp2((cosTheta * -5.55473 - 6.98316) * cosTheta);
+}
+vec4 Schlick(vec4 cosTheta, float4 fresnelPower)
+{
+    return Fresnel(cosTheta) / (cosTheta * (1 - fresnelPower)) * fresnelPower;
+}
+
+vec4 Schlick2(vec4 F0, vec4 cosTheta, float4 fresnelPower)
+{
+    return F0 + (1.0 - F0) * pow(ClampEpsilon(1.0 - cosTheta), fresnelPower);
+}
+
+
+vec3 ComputeFresnel(vec3 rayDirection, vec3 normal, vec3 refractiveIndex)
+{
+    float cosTheta = dot(-rayDirection, normal);
+    float3 r0 = (1.0 - refractiveIndex) / (1.0 + refractiveIndex);
+    r0 = r0 * r0;
+    return r0 + (1.0 - r0) * pow(ClampEpsilon(1.0 - cosTheta), FresnelPower);
+}
+
+
+
+vec4 PhaseFunction(vec4 normal, vec4 viewDir, vec4 phaseFactor)
+{
+    float cosTheta = ClampEpsilon(dot(normal.xyz, viewDir.xyz));
+    return (1.0f / (4.0f * 3.14159f) * (1.0f + (phaseFactor * cosTheta * cosTheta)));
+}
+
+//Convert from meters to nano-meters
+float nanoToMeters(float wavelength)
+{
+    return wavelength * 1e-9;
+}
+//Convert from nano-meters to meters
+float metersToNano(float wavelength)
+{
+    return wavelength * 1e9f;
+}
+
+float GetLuminance(float4 color)
+{
+    return dot(color, float4(0.3, 0.59, 0.11, 1.0));
+}
+
+float4 RotateAroundAxis(float4 v, float4 axis, float angle)
+{
+    // Normalize the axis
+    axis = normalize(axis);
+
+    // Compute the cosine and sine of the angle
+    float c = cos(angle);
+    float s = sin(angle);
+
+    // Compute the rotation matrix
+    float4x3 R;
+    R[0][0] = c + (1.0 - c) * axis.x * axis.x;
+    R[0][1] = (1.0 - c) * axis.x * axis.y - s * axis.z;
+    R[0][2] = (1.0 - c) * axis.x * axis.z + s * axis.y;
+    
+    R[1][0] = (1.0 - c) * axis.y * axis.x + s * axis.z;
+    R[1][1] = c + (1.0 - c) * axis.y * axis.y;
+    R[1][2] = (1.0 - c) * axis.y * axis.z - s * axis.x;
+   
+    R[2][0] = (1.0 - c) * axis.z * axis.x - s * axis.y;
+    R[2][1] = (1.0 - c) * axis.z * axis.y + s * axis.x;
+    R[2][2] = c + (1.0 - c) * axis.z * axis.z;
+   
+    // Multiply the vector by the rotation matrix
+    return float4(mul(R, v.xyz).xyz, v.w);
+}
+
+float3 RotateAroundAxis(float3 v, float3 axis, float angle)
+{
+    // Normalize the axis
+    axis = normalize(axis);
+
+    // Compute the cosine and sine of the angle
+    float c = cos(angle);
+    float s = sin(angle);
+
+    // Compute the rotation matrix
+    float4x3 R;
+    R[0][0] = c + (1.0 - c) * axis.x * axis.x;
+    R[0][1] = (1.0 - c) * axis.x * axis.y - s * axis.z;
+    R[0][2] = (1.0 - c) * axis.x * axis.z + s * axis.y;
+    
+    R[1][0] = (1.0 - c) * axis.y * axis.x + s * axis.z;
+    R[1][1] = c + (1.0 - c) * axis.y * axis.y;
+    R[1][2] = (1.0 - c) * axis.y * axis.z - s * axis.x;
+   
+    R[2][0] = (1.0 - c) * axis.z * axis.x - s * axis.y;
+    R[2][1] = (1.0 - c) * axis.z * axis.y + s * axis.x;
+    R[2][2] = c + (1.0 - c) * axis.z * axis.z;
+   
+    // Multiply the vector by the rotation matrix
+    return float3(mul(R, v.xyz).xyz);
+}
+
+float4 RotateAroundX(float4 v, float angle)
+{
+    float c = cos(angle);
+    float s = sin(angle);
+
+    return float4(v.x, c * v.y - s * v.z, s * v.y + c * v.z, v.w);
+}
+
+float3 RotateAroundX(float3 v, float angle)
+{
+    float c = cos(angle);
+    float s = sin(angle);
+
+    return float3(v.x, c * v.y - s * v.z, s * v.y + c * v.z);
+}
+
+float2 RotateAroundX(float2 v, float angle)
+{
+    float c = cos(angle);
+    float s = sin(angle);
+
+    return float2(v.x, c * v.y - s);
+}
+
+float4 RotateAroundY(float4 v, float angle)
+{
+    float c = cos(angle);
+    float s = sin(angle);
+
+    return float4(c * v.x + s * v.z, v.y, -s * v.x + c * v.z, v.w);
+}
+
+float3 RotateAroundY(float3 v, float angle)
+{
+    float c = cos(angle);
+    float s = sin(angle);
+
+    return float3(c * v.x + s * v.z, v.y, -s * v.x + c * v.z);
+}
+
+float2 RotateAroundY(float2 v, float angle)
+{
+    float c = cos(angle);
+    float s = sin(angle);
+
+    return float2(c * v.x + s, v.y);
+}
+
+float4 RotateAroundZ(float4 v, float angle)
+{
+    float c = cos(angle);
+    float s = sin(angle);
+
+    return float4(c * v.x - s * v.y, s * v.x + c * v.y, v.z, v.w);
+}
+
+float3 RotateAroundZ(float3 v, float angle)
+{
+    float c = cos(angle);
+    float s = sin(angle);
+
+    return float3(c * v.x - s * v.y, s * v.x + c * v.y, v.z);
+}
+
+float2 RotateAroundZ(float2 v, float angle)
+{
+    float c = cos(angle);
+    float s = sin(angle);
+
+    return float2(c * v.x - s * v.y, s * v.x + c * v.y);
+}
+
+float2 GetView(float2 viewDir, float2 uv)
+{
+    return 2.0 / (1.0 + exp(-(viewDir.xy) * length(uv - 0.5))) - 1.0;
+}
+
+
+float4 RainbowOilFilm(float2 uv, float3 normal, float3 lightDir, float3 viewDir, float4 color)
+{
+    color = ClampEpsilon(color);
+
+    // The thickness of the oil film in nanometers
+    float thickness = 200.0 + 100.0 * sin(uv.x * 10.0) * cos(uv.y * 10.0);
+    
+    // The refractive indices of the oil and air
+    float n1 = 1.33; // oil
+    float n2 = 1.00; // air
+    
+    // The angle of incidence between the normal and the light direction
+    float theta = acos(dot(normal, lightDir));
+    
+    // The angle of refraction using Snell's law
+    float phi = asin(n2 * sin(theta) / n1);
+    
+    // The reflectance of the oil film using Fresnel's equations
+    float Rs = pow((n1 * cos(theta) - n2 * cos(phi)) / (n1 * cos(theta) + n2 * cos(phi)), 2.0);
+    float Rp = pow((n1 * cos(phi) - n2 * cos(theta)) / (n1 * cos(phi) + n2 * cos(theta)), 2.0);
+    float R = (Rs + Rp) / 2.0;
+    
+    // The phase difference between the reflected rays using the thin film interference formula
+    float delta = 4.0 * PI * n1 * thickness * cos(phi) / 550.0; // 550 nm is the wavelength of green light
+    
+    // The interference color using the RGB color model
+    float Ir = (R + R * cos(delta - 4.0 * PI / 3.0));
+    float Ig = (R + R * cos(delta));
+    float Ib = (R + R * cos(delta + 4.0 * PI / 3.0));
+    
+    // The final color after adding the interference color to the original color
+    float4 result;
+    result.r = (color.r + Ir);
+    result.g = (color.g + Ig);
+    result.b = (color.b + Ib);
+    result.a = color.a;
+    
+    // Return the final color
+    return result;
+}
+
+// Function to sample the texture and apply modulation
+float4 SampleWithModulation(Texture2D tex, float2 uv, float2 offset, float2 oosz, float2 gradientModulation)
+{
+    return mir2D(tex, uv + offset * oosz * gradientModulation);
+}
+
+// Simplified blur function
+float4 Blur(float2 oosz, Texture2D tex, float2 uv, float dist, float strength, float2 gradientModulation)
+{
+    // Sample the original texture
+    float4 color = mir2D(tex, uv);
+    float4 blurColor[4];
+    
+    // Calculate blur samples
+    blurColor[0] = SampleWithModulation(tex, uv, float2(-dist, -dist), oosz, gradientModulation);
+    blurColor[1] = SampleWithModulation(tex, uv, float2(dist, dist), oosz, gradientModulation);
+    blurColor[2] = SampleWithModulation(tex, uv, float2(-dist, dist), oosz, gradientModulation);
+    blurColor[3] = SampleWithModulation(tex, uv, float2(dist, -dist), oosz, gradientModulation);
+    
+    // Blend the blur samples
+    float4 blendedBlur = slerp(blurColor[3], slerp(blurColor[2], slerp(blurColor[1], blurColor[0], 0.35), 0.35), 0.35);
+    
+    // Combine with original color
+    return ClampEpsilon11(slerp(color, blendedBlur, strength));
+}
+
+struct SellmeierCoefficient
+{
+    float B;
+    float C;
+};
+
+SellmeierCoefficient CreateSellmeierCoefficient(float b, float c)
+{
+    SellmeierCoefficient ret;
+    ret.B = b;
+    ret.C = c;
+    return ret;
+}
+
+struct MaterialProperties
+{
+    float refractiveIndex;
+    float outsideRefractiveIndex;
+    SellmeierCoefficient sellmeierCoefficients[3];
+    float3 baseColor;
+    float smoothness;
+    float metalness;
+    float plasmaFrequency;
+    float collisionFrequency;
+};
+
+MaterialProperties CreateAluminumMaterial()
+{
+    MaterialProperties ret;
+    ret.outsideRefractiveIndex = 1;
+    SellmeierCoefficient c1 = { 0.0, 0.0 };
+    SellmeierCoefficient c2 = { 0.0, 0.0 };
+    SellmeierCoefficient c3 = { 0.0, 0.0 };
+    
+    ret.sellmeierCoefficients[0] = c1;
+    ret.sellmeierCoefficients[1] = c2;
+    ret.sellmeierCoefficients[2] = c3;
+    ret.baseColor = float3(0.9137, 0.9137, 0.9217);
+    ret.refractiveIndex = 1.44;
+    ret.smoothness = 0.8;
+    ret.metalness = 1.0;
+    ret.plasmaFrequency = 1.57e16;
+    ret.collisionFrequency = 1.08e14;
+    return ret;
+}
+
+MaterialProperties CreateBerylliumMaterial()
+{
+    MaterialProperties ret;
+    ret.outsideRefractiveIndex = 1;
+    SellmeierCoefficient c1 = { 0.09, 0.1 };
+    SellmeierCoefficient c2 = { 0.0, 0.0 };
+    SellmeierCoefficient c3 = { 0.0, 0.0 };
+    
+    ret.sellmeierCoefficients[0] = c1;
+    ret.sellmeierCoefficients[1] = c2;
+    ret.sellmeierCoefficients[2] = c3;
+    ret.baseColor = float3(0.8, 0.8, 0.8);
+    ret.refractiveIndex = 1.077;
+    ret.smoothness = 0.7;
+    ret.metalness = 1.0;
+    ret.plasmaFrequency = 1.86e16;
+    ret.collisionFrequency = 2.41e14;
+    return ret;
+}
+
+MaterialProperties CreateChromiumMaterial()
+{
+    MaterialProperties ret;
+    ret.outsideRefractiveIndex = 1;
+    SellmeierCoefficient c1 = { 0.0, 0.0 };
+    SellmeierCoefficient c2 = { 0.0, 0.0 };
+    SellmeierCoefficient c3 = { 0.0, 0.0 };
+    
+    ret.sellmeierCoefficients[0] = c1;
+    ret.sellmeierCoefficients[1] = c2;
+    ret.sellmeierCoefficients[2] = c3;
+    ret.baseColor = float3(0.5451, 0.5451, 0.5451);
+    ret.refractiveIndex = 3.1;
+    ret.smoothness = 0.6;
+    ret.metalness = 1.0;
+    ret.plasmaFrequency = 1.37e16;
+    ret.collisionFrequency = 5.98e13;
+    return ret;
+}
+
+MaterialProperties CreateLeadMaterial()
+{
+    MaterialProperties ret;
+    ret.outsideRefractiveIndex = 1;
+    SellmeierCoefficient c1 = { 0.0, 0.0 };
+    SellmeierCoefficient c2 = { 0.0, 0.0 };
+    SellmeierCoefficient c3 = { 0.0, 0.0 };
+    
+    ret.sellmeierCoefficients[0] = c1;
+    ret.sellmeierCoefficients[1] = c2;
+    ret.sellmeierCoefficients[2] = c3;
+    ret.baseColor = float3(0.3373, 0.3216, 0.3216);
+    ret.refractiveIndex = 2.0;
+    ret.smoothness = 0.4;
+    ret.metalness = 1.0;
+    ret.plasmaFrequency = 1.37e16;
+    ret.collisionFrequency = 5.47e13;
+    return ret;
+}
+
+MaterialProperties CreateMagnesiumMaterial()
+{
+    MaterialProperties ret;
+    ret.outsideRefractiveIndex = 1;
+    SellmeierCoefficient c1 = { 0.0, 0.0 };
+    SellmeierCoefficient c2 = { 0.0, 0.0 };
+    SellmeierCoefficient c3 = { 0.0, 0.0 };
+    
+    ret.sellmeierCoefficients[0] = c1;
+    ret.sellmeierCoefficients[1] = c2;
+    ret.sellmeierCoefficients[2] = c3;
+    ret.baseColor = float3(0.8, 0.8, 0.9137);
+    ret.refractiveIndex = 1.74;
+    ret.smoothness = 0.7;
+    ret.metalness = 1.0;
+    ret.plasmaFrequency = 1.76e16;
+    ret.collisionFrequency = 1.66e14;
+    return ret;
+}
+
+MaterialProperties CreateMolybdenumMaterial()
+{
+    MaterialProperties ret;
+    ret.outsideRefractiveIndex = 1;
+    SellmeierCoefficient c1 = { 0.0, 0.0 };
+    SellmeierCoefficient c2 = { 0.0, 0.0 };
+    SellmeierCoefficient c3 = { 0.0, 0.0 };
+    
+    ret.sellmeierCoefficients[0] = c1;
+    ret.sellmeierCoefficients[1] = c2;
+    ret.sellmeierCoefficients[2] = c3;
+    ret.baseColor = float3(0.6588, 0.6588, 0.6588);
+    ret.refractiveIndex = 3.9;
+    ret.smoothness = 0.6;
+    ret.metalness = 1.0;
+    ret.plasmaFrequency = 1.64e16;
+    ret.collisionFrequency = 1.86e14;
+    return ret;
+}
+
+MaterialProperties CreateNickelMaterial()
+{
+    MaterialProperties ret;
+    ret.outsideRefractiveIndex = 1;
+    SellmeierCoefficient c1 = { 0.0, 0.0 };
+    SellmeierCoefficient c2 = { 0.0, 0.0 };
+    SellmeierCoefficient c3 = { 0.0, 0.0 };
+    
+    ret.sellmeierCoefficients[0] = c1;
+    ret.sellmeierCoefficients[1] = c2;
+    ret.sellmeierCoefficients[2] = c3;
+    ret.baseColor = float3(0.6588, 0.6196, 0.6196);
+    ret.refractiveIndex = 2.2;
+    ret.smoothness = 0.5;
+    ret.metalness = 1.0;
+    ret.plasmaFrequency = 1.55e16;
+    ret.collisionFrequency = 4.05e14;
+    return ret;
+}
+
+MaterialProperties CreatePalladiumMaterial()
+{
+    MaterialProperties ret;
+    ret.outsideRefractiveIndex = 1;
+    SellmeierCoefficient c1 = { 0.0, 0.0 };
+    SellmeierCoefficient c2 = { 0.0, 0.0 };
+    SellmeierCoefficient c3 = { 0.0, 0.0 };
+    
+    ret.sellmeierCoefficients[0] = c1;
+    ret.sellmeierCoefficients[1] = c2;
+    ret.sellmeierCoefficients[2] = c3;
+    ret.baseColor = float3(0.7373, 0.7216, 0.6745);
+    ret.refractiveIndex = 2.5;
+    ret.smoothness = 0.7;
+    ret.metalness = 1.0;
+    ret.plasmaFrequency = 1.46e16;
+    ret.collisionFrequency = 6.81e13;
+    return ret;
+}
+
+MaterialProperties CreatePlatinumMaterial()
+{
+    MaterialProperties ret;
+    ret.outsideRefractiveIndex = 1;
+    SellmeierCoefficient c1 = { 0.0, 0.0 };
+    SellmeierCoefficient c2 = { 0.0, 0.0 };
+    SellmeierCoefficient c3 = { 0.0, 0.0 };
+    
+    ret.sellmeierCoefficients[0] = c1;
+    ret.sellmeierCoefficients[1] = c2;
+    ret.sellmeierCoefficients[2] = c3;
+    ret.baseColor = float3(0.7373, 0.7373, 0.7647);
+    ret.refractiveIndex = 2.3;
+    ret.smoothness = 0.8;
+    ret.metalness = 1.0;
+    ret.plasmaFrequency = 1.37e16;
+    ret.collisionFrequency = 6.16e13;
+    return ret;
+}
+
+MaterialProperties CreateTantalumMaterial()
+{
+    MaterialProperties ret;
+    ret.outsideRefractiveIndex = 1;
+    SellmeierCoefficient c1 = { 0.0, 0.0 };
+    SellmeierCoefficient c2 = { 0.0, 0.0 };
+    SellmeierCoefficient c3 = { 0.0, 0.0 };
+    
+    ret.sellmeierCoefficients[0] = c1;
+    ret.sellmeierCoefficients[1] = c2;
+    ret.sellmeierCoefficients[2] = c3;
+    ret.baseColor = float3(0.3294, 0.3294, 0.3294);
+    ret.refractiveIndex = 2.2;
+    ret.smoothness = 0.5;
+    ret.metalness = 1.0;
+    ret.plasmaFrequency = 1.59e16;
+    ret.collisionFrequency = 1.92e14;
+    return ret;
+}
+
+MaterialProperties CreateTitaniumMaterial()
+{
+    MaterialProperties ret;
+    ret.outsideRefractiveIndex = 1;
+    SellmeierCoefficient c1 = { 0.0, 0.0 };
+    SellmeierCoefficient c2 = { 0.0, 0.0 };
+    SellmeierCoefficient c3 = { 0.0, 0.0 };
+    
+    ret.sellmeierCoefficients[0] = c1;
+    ret.sellmeierCoefficients[1] = c2;
+    ret.sellmeierCoefficients[2] = c3;
+    ret.baseColor = float3(0.5451, 0.5451, 0.5451);
+    ret.refractiveIndex = 2.5;
+    ret.smoothness = 0.6;
+    ret.metalness = 1.0;
+    ret.plasmaFrequency = 1.76e16;
+    ret.collisionFrequency = 5.59e14;
+    return ret;
+}
+
+MaterialProperties CreateTungstenMaterial()
+{
+    MaterialProperties ret;
+    ret.outsideRefractiveIndex = 1;
+    SellmeierCoefficient c1 = { 0.0, 0.0 };
+    SellmeierCoefficient c2 = { 0.0, 0.0 };
+    SellmeierCoefficient c3 = { 0.0, 0.0 };
+    
+    ret.sellmeierCoefficients[0] = c1;
+    ret.sellmeierCoefficients[1] = c2;
+    ret.sellmeierCoefficients[2] = c3;
+    ret.baseColor = float3(0.3294, 0.3294, 0.3294);
+    ret.refractiveIndex = 3.4;
+    ret.smoothness = 0.4;
+    ret.metalness = 1.0;
+    ret.plasmaFrequency = 1.56e16;
+    ret.collisionFrequency = 1.19e14;
+    return ret;
+}
+
+MaterialProperties CreateVanadiumMaterial()
+{
+    MaterialProperties ret;
+    ret.outsideRefractiveIndex = 1;
+    SellmeierCoefficient c1 = { 0.0, 0.0 };
+    SellmeierCoefficient c2 = { 0.0, 0.0 };
+    SellmeierCoefficient c3 = { 0.0, 0.0 };
+    
+    ret.sellmeierCoefficients[0] = c1;
+    ret.sellmeierCoefficients[1] = c2;
+    ret.sellmeierCoefficients[2] = c3;
+    ret.baseColor = float3(0.6588, 0.6588, 0.6588);
+    ret.refractiveIndex = 3.2;
+    ret.smoothness = 0.6;
+    ret.metalness = 1.0;
+    ret.plasmaFrequency = 1.71e16;
+    ret.collisionFrequency = 5.05e14;
+    return ret;
+}
+
+MaterialProperties CreateZirconiumMaterial()
+{
+    MaterialProperties ret;
+    ret.outsideRefractiveIndex = 1;
+    SellmeierCoefficient c1 = { 0.0, 0.0 };
+    SellmeierCoefficient c2 = { 0.0, 0.0 };
+    SellmeierCoefficient c3 = { 0.0, 0.0 };
+    
+    ret.sellmeierCoefficients[0] = c1;
+    ret.sellmeierCoefficients[1] = c2;
+    ret.sellmeierCoefficients[2] = c3;
+    ret.baseColor = float3(0.6588, 0.6588, 0.6588);
+    ret.refractiveIndex = 2.2;
+    ret.smoothness = 0.6;
+    ret.metalness = 1.0;
+    ret.plasmaFrequency = 1.64e16;
+    ret.collisionFrequency = 4.95e14;
+    return ret;
+}
+
+MaterialProperties CreateOpalMaterial()
+{
+    MaterialProperties ret;
+    ret.outsideRefractiveIndex = 1;
+    SellmeierCoefficient c1 = { 2.73, 0.0699 };
+    SellmeierCoefficient c2 = { 0.2, 0.0631 };
+    SellmeierCoefficient c3 = { 0.0, 0.0 };
+    
+    ret.sellmeierCoefficients[0] = c1;
+    ret.sellmeierCoefficients[1] = c2;
+    ret.sellmeierCoefficients[2] = c3;
+    ret.baseColor = float3(1.0, 0.7, 0.2);
+    ret.refractiveIndex = 1.45;
+    ret.smoothness = 0.1;
+    ret.metalness = 0.0;
+    ret.plasmaFrequency = 0.0;
+    ret.collisionFrequency = 0.0;
+    return ret;
+}
+
+MaterialProperties CreateMylarMaterial()
+{
+    MaterialProperties ret;
+    ret.outsideRefractiveIndex = 1;
+    SellmeierCoefficient c1 = { 0.0, 0.0 };
+    SellmeierCoefficient c2 = { 0.0, 0.0 };
+    SellmeierCoefficient c3 = { 0.0, 0.0 };
+    
+    ret.sellmeierCoefficients[0] = c1;
+    ret.sellmeierCoefficients[1] = c2;
+    ret.sellmeierCoefficients[2] = c3;
+    ret.baseColor = float3(1.0, 1.0, 1.0);
+    ret.refractiveIndex = 1.64;
+    ret.smoothness = 0.8;
+    ret.metalness = 0.0;
+    ret.plasmaFrequency = 0.0;
+    ret.collisionFrequency = 0.0;
+    return ret;
+}
+
+MaterialProperties CreatePrismMaterial()
+{
+    MaterialProperties ret;
+    ret.outsideRefractiveIndex = 1;
+    SellmeierCoefficient c1 = { 1.03, 0.00585 };
+    SellmeierCoefficient c2 = { 0.23, 0.0203 };
+    SellmeierCoefficient c3 = { 1.01, 100.0 };
+    
+    ret.sellmeierCoefficients[0] = c1;
+    ret.sellmeierCoefficients[1] = c2;
+    ret.sellmeierCoefficients[2] = c3;
+    ret.baseColor = float3(1.0, 1.0, 1.0);
+    ret.refractiveIndex = 1.51;
+    ret.smoothness = 0.9;
+    ret.metalness = 0.0;
+    ret.plasmaFrequency = 0.0;
+    ret.collisionFrequency = 0.0;
+    return ret;
+}
+
+MaterialProperties CreateCrownGlassMaterial()
+{
+    MaterialProperties ret;
+    ret.outsideRefractiveIndex = 1;
+    SellmeierCoefficient c1 = { 1.62, 0.0537 };
+    SellmeierCoefficient c2 = { 0.31, 0.2058 };
+    SellmeierCoefficient c3 = { 1.03, 103.6 };
+    
+    ret.sellmeierCoefficients[0] = c1;
+    ret.sellmeierCoefficients[1] = c2;
+    ret.sellmeierCoefficients[2] = c3;
+    ret.baseColor = float3(1.0, 1.0, 1.0);
+    ret.refractiveIndex = 1.52;
+    ret.smoothness = 0.8;
+    ret.metalness = 0.0;
+    ret.plasmaFrequency = 0.0;
+    ret.collisionFrequency = 0.0;
+    return ret;
+}
+
+MaterialProperties CreateSapphireMaterial()
+{
+    MaterialProperties ret;
+    ret.outsideRefractiveIndex = 1;
+    SellmeierCoefficient c1 = { 3.04, 0.0647 };
+    SellmeierCoefficient c2 = { 0.68, 0.1264 };
+    SellmeierCoefficient c3 = { 0.0, 0.0 };
+    
+    ret.sellmeierCoefficients[0] = c1;
+    ret.sellmeierCoefficients[1] = c2;
+    ret.sellmeierCoefficients[2] = c3;
+    ret.baseColor = float3(0.1, 0.9, 0.8);
+    ret.refractiveIndex = 1.77;
+    ret.smoothness = 0.9;
+    ret.metalness = 0.0;
+    ret.plasmaFrequency = 0.0;
+    ret.collisionFrequency = 0.0;
+    return ret;
+}
+
+MaterialProperties CreateDiamondMaterial()
+{
+    MaterialProperties ret;
+    ret.outsideRefractiveIndex = 1;
+    SellmeierCoefficient c1 = { 4.68, 0.0766 };
+    SellmeierCoefficient c2 = { 0.64, 0.1032 };
+    SellmeierCoefficient c3 = { 0.0, 0.0 };
+    
+    ret.sellmeierCoefficients[0] = c1;
+    ret.sellmeierCoefficients[1] = c2;
+    ret.sellmeierCoefficients[2] = c3;
+    ret.baseColor = float3(1.0, 1.0, 1.0);
+    ret.refractiveIndex = 2.42;
+    ret.smoothness = 0.999;
+    ret.metalness = 0.0;
+    ret.plasmaFrequency = 0.0;
+    ret.collisionFrequency = 0.0;
+    return ret;
+}
+
+MaterialProperties CreateRubyMaterial()
+{
+    MaterialProperties ret;
+    ret.outsideRefractiveIndex = 1;
+    SellmeierCoefficient c1 = { 1.76, 0.0048 };
+    SellmeierCoefficient c2 = { 0.27683, 0.0032 };
+    SellmeierCoefficient c3 = { 0.0, 0.0 };
+    
+    ret.sellmeierCoefficients[0] = c1;
+    ret.sellmeierCoefficients[1] = c2;
+    ret.sellmeierCoefficients[2] = c3;
+    ret.baseColor = float3(0.8, 0.05, 0.05);
+    ret.refractiveIndex = 1.77;
+    ret.smoothness = 0.5;
+    ret.metalness = 0.2;
+    ret.plasmaFrequency = 0.0;
+    ret.collisionFrequency = 0.0;
+    return ret;
+}
+
+MaterialProperties CreateBK7GlassMaterial()
+{
+    MaterialProperties ret;
+    ret.outsideRefractiveIndex = 1;
+    SellmeierCoefficient c1 = { 1.03, 0.00585 };
+    SellmeierCoefficient c2 = { 0.23, 0.0203 };
+    SellmeierCoefficient c3 = { 1.01, 100.0 };
+    
+    ret.sellmeierCoefficients[0] = c1;
+    ret.sellmeierCoefficients[1] = c2;
+    ret.sellmeierCoefficients[2] = c3;
+    ret.baseColor = float3(1.0, 1.0, 1.0);
+    ret.refractiveIndex = 1.52;
+    ret.smoothness = 0.8;
+    ret.metalness = 0.0;
+    ret.plasmaFrequency = 0.0;
+    ret.collisionFrequency = 0.0;
+    return ret;
+}
+
+MaterialProperties CreateFusedSilicaMaterial()
+{
+    MaterialProperties ret;
+    ret.outsideRefractiveIndex = 1;
+    SellmeierCoefficient c1 = { 0.69, 0.0068 };
+    SellmeierCoefficient c2 = { 0.07, 0.0116 };
+    SellmeierCoefficient c3 = { 0.0, 0.0 };
+    
+    ret.sellmeierCoefficients[0] = c1;
+    ret.sellmeierCoefficients[1] = c2;
+    ret.sellmeierCoefficients[2] = c3;
+    ret.baseColor = float3(1.0, 1.0, 1.0);
+    ret.refractiveIndex = 1.46;
+    ret.smoothness = 0.9;
+    ret.metalness = 0.0;
+    ret.plasmaFrequency = 0.0;
+    ret.collisionFrequency = 0.0;
+    return ret;
+}
+
+MaterialProperties CreateMaterial(int index)
+{
+    MaterialProperties ret;
+    
+    switch (abs(index) % 23)
+    {
+        case 0:
+            ret = CreateBK7GlassMaterial();
+            break;
+        case 1:
+            ret = CreateCrownGlassMaterial();
+            break;
+        case 2:
+            ret = CreatePrismMaterial();
+            break;
+        case 3:
+            ret = CreateFusedSilicaMaterial();
+            break;
+        case 4:
+            ret = CreateAluminumMaterial();
+            break;
+        case 5:
+            ret = CreateBerylliumMaterial();
+            break;
+        case 6:
+            ret = CreateChromiumMaterial();
+            break;
+        case 7:
+            ret = CreateLeadMaterial();
+            break;
+        case 8:
+            ret = CreateMagnesiumMaterial();
+            break;
+        case 9:
+            ret = CreateMolybdenumMaterial();
+            break;
+        case 10:
+            ret = CreateMylarMaterial();
+            break;
+        case 11:
+            ret = CreateNickelMaterial();
+            break;
+        case 12:
+            ret = CreatePalladiumMaterial();
+            break;
+        case 13:
+            ret = CreatePlatinumMaterial();
+            break;
+        case 14:
+            ret = CreateTantalumMaterial();
+            break;
+        case 15:
+            ret = CreateTitaniumMaterial();
+            break;
+        case 16:
+            ret = CreateTungstenMaterial();
+            break;
+        case 17:
+            ret = CreateVanadiumMaterial();
+            break;
+        case 18:
+            ret = CreateZirconiumMaterial();
+            break;
+        case 19:
+            ret = CreateDiamondMaterial();
+            break;
+        case 20:
+            ret = CreateOpalMaterial();
+            break;
+        case 21:
+            ret = CreateRubyMaterial();
+            break;
+        case 22:
+            ret = CreateSapphireMaterial();
+            break;
+    }
+    return ret;
+}
+float CalculateRefractiveIndexUsingSellmeier(MaterialProperties material, float wavelength)
+{
+    // Convert wavelength to micrometers (if needed)
+    // Assuming wavelength is given in nanometers, convert to micrometers
+    float lambdaMicrometers = wavelength * 1e-3;
+    float lambdaSquared = lambdaMicrometers * lambdaMicrometers;
+    
+    // Initialize nSquared with 1.0 (accounting for vacuum contribution)
+    float nSquared = 1.0;
+
+    // Calculate the refractive index using the Sellmeier equation
+    for (int i = 0; i < 3; i++)
+    {
+        float B = material.sellmeierCoefficients[i].B;
+        float C = material.sellmeierCoefficients[i].C;
+        // Ensure no division by zero or negative value under the square root
+        if (lambdaSquared != C)
+        {
+            nSquared += (B * lambdaSquared) / (lambdaSquared - C);
+        }
+    }
+
+    // Return the square root of nSquared to get the refractive index
+    return sqrt(nSquared);
+}
+
+// Calculates the geometric attenuation factor
+float GGXGeometry(float NdotV, float alphaRoughness, float NdotL)
+{
+    float k = (alphaRoughness * alphaRoughness) * 0.5;
+    float G1V = NdotV / (NdotV * (1.0 - k) + k);
+    float G1L = NdotL / (NdotL * (1.0 - k) + k);
+    return (G1V * G1L);
+}
+
+// Calculates the microfacet distribution
+float GGXDistribution(float NdotH, float alphaRoughness)
+{
+    float alphaRoughness2 = alphaRoughness * alphaRoughness;
+    float NdotH2 = NdotH * NdotH;
+    float denom = NdotH2 * (alphaRoughness2 - 1.0) + 1.0;
+    return alphaRoughness2 / (PI * denom * denom);
+}
+
+float GeometrySmith(float3 N, float3 V, float3 L, float roughness)
+{
+    float NdotV = ClampEpsilon(dot(N, V));
+    float NdotL = ClampEpsilon(dot(N, L));
+    float k = roughness * roughness * 0.5;
+    float G1V = NdotV / (NdotV * (1.0 - k) + k);
+    float G1L = NdotL / (NdotL * (1.0 - k) + k);
+    return G1V * G1L;
+}
+
+float4 SpecularTerm(float3 normal, float3 viewDir, float3 lightDir, float4 specularPower, float4 specularIntensity)
+{
+    float3 reflectDir = reflect(-ClampEpsilon11(lightDir), ClampEpsilon11(normal));
+    return pow(ClampEpsilon(dot(reflectDir, ClampEpsilon11(viewDir))), specularPower) * specularIntensity;
+}
+
+
+float ggxDistribution(float NdotH, float roughness)
+{
+    float alphaRoughness = roughness * roughness;
+    float NdotH2 = NdotH * NdotH;
+    float denom = NdotH2 * (alphaRoughness - 1.0) + 1.0;
+    return alphaRoughness / (PI * denom * denom);
+}
+
+// GGX Geometry
+float ggxGeometry(float NdotV, float NdotL, float roughness)
+{
+    float alphaRoughness = roughness * roughness;
+    float k = alphaRoughness * 0.5;
+    float G1V = NdotV / (NdotV * (1.0 - k) + k);
+    float G1L = NdotL / (NdotL * (1.0 - k) + k);
+    return G1V * G1L;
+}
+
+float SmithGGXCorrelated(float NdotL, float NdotV, float roughness2)
+{
+    roughness2 = ClampEpsilon(roughness2);
+    float a2 = ClampEpsilon(roughness2 * roughness2);
+    float sqrtNdotV = sqrt(ClampEpsilon(NdotV));
+    float sqrtNdotL = sqrt(ClampEpsilon(NdotL));
+    float GGXV = NdotL * (sqrtNdotV * sqrtNdotV * (1.0 - a2) + a2);
+    float GGXL = NdotV * (sqrtNdotL * sqrtNdotL * (1.0 - a2) + a2);
+    return 0.5 / ClampEpsilon(GGXV + GGXL);
+}
+
+float3 FresnelSchlickDiffuse(float NdotL, float3 F0)
+{
+    return ClampEpsilon((1.0 - F0) * (1.0 - pow(ClampEpsilon(1.0 - NdotL), FresnelPower)));
+}
+
+float3 FresnelSchlickReflectance(float3 F0, float VdotH, float NdotL)
+{
+    return ClampEpsilon(F0 + (1.0 - F0) * pow(ClampEpsilon(1.0 - VdotH), FresnelReflectance));
+}
+
+float3 FresnelReflection(float3 F0, float VdotH)
+{
+    return ClampEpsilon(F0 + (1.0 - F0) * pow(ClampEpsilon(1.0 - VdotH), FresnelReflectance));
+}
+// Improved Fresnel Schlick for Dielectrics (Non-Metals)
+float3 FresnelSchlickDielectric(float cosTheta, float3 F0)
+{
+    // Ensure cosTheta is clamped to valid range
+    cosTheta = ClampEpsilon(cosTheta);
+
+    // Schlick's approximation
+    return F0 + (1.0 - F0) * pow(1.0 - cosTheta, FresnelPower);
+}
+
+// Fresnel Reflectance for Conductors (Metals)
+float3 FresnelConductor(float3 eta, float3 k, float cosTheta)
+{
+    // Ensure cosTheta is clamped to the valid range [0, 1]
+    cosTheta = ClampEpsilon(cosTheta);
+    float cosTheta2 = cosTheta * cosTheta;
+    float sinTheta2 = ClampEpsilon(1.0 - cosTheta2);
+
+    // Compute eta^2 and k^2
+    float3 eta2 = ClampEpsilon(eta * eta);
+    float3 k2 = (k * k);
+
+    // Calculate the terms used in the Fresnel equations
+    float3 temp = ClampEpsilon(eta2 - k2 - sinTheta2);
+    float3 a2pb2 = (sqrt(temp * temp + 2.0 * eta2 * k2));
+
+    // Calculate Rs and Rp
+    float3 Rs = ((a2pb2 - temp) / (a2pb2 + temp + 2.0 * cosTheta2));
+    float3 Rp = ((a2pb2 * cosTheta2 - sinTheta2) / (a2pb2 * cosTheta2 + sinTheta2));
+
+    // Average Rs and Rp to get the Fresnel reflectance
+    return ClampEpsilon(0.5 * (Rs + Rp));
+}
+
+// Complex Index of Refraction (Sellmeier-based for dielectrics)
+float2 ComplexIOR_Dielectric(MaterialProperties mat, float wavelength)
+{
+    float lambda2 = wavelength * wavelength;
+    float eta2 = 1.0; // Initialize squared index of refraction
+
+    for (int i = 0; i < 3; i++)
+    {
+        eta2 += mat.sellmeierCoefficients[i].B * lambda2 / (lambda2 - mat.sellmeierCoefficients[i].C);
+    }
+
+    float eta = sqrt(eta2);
+    float k = epsilon; // No absorption for pure dielectrics
+    return (float2(eta, k));
+}
+
+
+// Complex Index of Refraction (Drude model for conductors)
+float2 ComplexIOR_Conductor(MaterialProperties mat, float wavelength)
+{
+    float omegaP2 = mat.plasmaFrequency * mat.plasmaFrequency;
+    float gamma2 = mat.collisionFrequency * mat.collisionFrequency;
+    float lambda2 = wavelength * wavelength;
+
+    float realPart = 1.0 - omegaP2 * lambda2 / (gamma2 + lambda2);
+    float imaginaryPart = omegaP2 * wavelength / (mat.collisionFrequency * (mat.collisionFrequency + wavelength * wavelength));
+
+    float eta = sqrt(0.5 * (realPart + sqrt(realPart * realPart + imaginaryPart * imaginaryPart)));
+    float k = sqrt(0.5 * (-realPart + sqrt(realPart * realPart + imaginaryPart * imaginaryPart)));
+
+    return float2(eta, k);
+}
+
+// Combined Fresnel Calculation (Handles Both Dielectrics and Conductors)
+float3 FresnelSchlick(float3 F0, float cosTheta, float metalness, float3 k)
+{
+    // Interpolate between dielectric and conductor Fresnel based on metalness
+    return ClampEpsilon(slerp(FresnelSchlickDielectric(cosTheta, F0),
+               FresnelConductor(F0, k, cosTheta),
+               metalness));
+}
+
+// Enhanced QFresnel Function (Uses Improved Fresnel Calculation)
+float4 QFresnelm(float4 color, float metalness)
+{
+    float3 F0 = slerp(vec3(0.04, 0.04, 0.04), ClampEpsilon(color.rgb), ClampEpsilon(metalness));
+    float3 fresnel = ClampEpsilon(FresnelSchlick(F0, ClampEpsilon(config.HdotV), ClampEpsilon(metalness), epsilon));
+
+    // Interpolate between diffuse and specular Fresnel based on NdotV
+    return float4(slerp(ClampEpsilon(color.rgb) * (1.0 - fresnel), fresnel, saturate(1.0 - ClampEpsilon(config.NdotV))), 1.0);
+}
+
+
+// Fresnel Reflectance for Dielectric Materials (Unpolarized)
+float3 FresnelDielectric(float etaI, float etaT, float cosThetaI)
+{
+    // Ensure cosThetaI is clamped to valid range
+    cosThetaI = ClampEpsilon11(cosThetaI);
+    etaI = (etaI);
+    etaT = (etaT);
+    // Handle case where ray is inside the material
+    if (cosThetaI < 0.0)
+    {
+        float f = etaI;
+        etaI = etaT;
+        etaT = f;
+
+        cosThetaI = -cosThetaI;
+    }
+
+    // Calculate cosine of transmission angle using Snell's law
+    float sinThetaTSqr = ClampEpsilon((etaI / etaT) * (etaI / etaT) * (1.0 - cosThetaI * cosThetaI));
+    float cosThetaT = ClampEpsilon(sqrt(max(0.0, 1.0 - sinThetaTSqr))); // Handle possible total internal reflection
+
+    // Fresnel equations (unpolarized)
+    float rParallel = ((etaT * cosThetaI) - (etaI * cosThetaT)) / ((etaT * cosThetaI) + (etaI * cosThetaT));
+    float rPerpendicular = ((etaI * cosThetaI) - (etaT * cosThetaT)) / ((etaI * cosThetaI) + (etaT * cosThetaT));
+
+    // Average reflectance for unpolarized light
+    return (0.5 * (rParallel * rParallel + rPerpendicular * rPerpendicular));
+}
+
+#define NUM_WAVELENGTH_SAMPLES 32  // Increase for higher accuracy
+
+float4 QFresnel(float4 color, MaterialProperties mat)
+{
+    // Extract relevant material properties
+    float3 F0 = slerp(vec3(0.04, 0.04, 0.04), max(vec3(0.04, 0.04, 0.04)
+    , mat.baseColor), mat.metalness);
+    float roughness = 1.0 - ClampEpsilon(mat.smoothness);
+
+    // Wavelength range (visible spectrum)
+    const float minWavelength = 380e-9; // Violet (in meters)
+    const float maxWavelength = 750e-9; // Red (in meters)
+
+    // Calculate wavelength step
+    float wavelengthStep = (maxWavelength - minWavelength) / float(NUM_WAVELENGTH_SAMPLES - 1);
+
+    // Accumulate Fresnel contributions across wavelengths
+    float3 fresnelSum = float3(0.0, 0.0, 0.0);
+    float3 specularSum = float3(0.0, 0.0, 0.0);
+    for (int i = 0; i < NUM_WAVELENGTH_SAMPLES; ++i)
+    {
+        float wavelength = minWavelength + float(i) * wavelengthStep;
+
+            // Metal: Use complex IOR-based Fresnel
+        float2 etaK = ComplexIOR_Conductor(mat, wavelength);
+        float fresnel1 = FresnelConductor(etaK.x, etaK.y, config.HdotV);
+        
+        float etaI = 1.0;
+        float etaT = ComplexIOR_Dielectric(mat, wavelength);
+        //float etaT = CalculateRefractiveIndexUsingSellmeier(mat, wavelength); // Transmitted medium refractive index
+        float fresnel2 = FresnelDielectric(etaI, etaT, config.HdotV);
+        
+        float fresnel = slerp(ClampEpsilon(fresnel1), ClampEpsilon(fresnel2), ClampEpsilon(mat.metalness));
+
+        // Adjust Fresnel for roughness (for dielectrics only)
+        if (mat.metalness == 0.0)
+        {
+            float3 F90 = F0 * (1.0 + roughness * roughness);
+            fresnel = ClampEpsilon(slerp(fresnel, F90, pow(1.0 - config.NdotV, FresnelPower)));
+        }
+
+        fresnelSum += fresnel * wavelengthStep; // Sum Fresnel contributions, weighted by wavelength interval
+    
+        // Calculate and accumulate specular reflection (assuming a Cook-Torrance microfacet model)
+        float alpha = roughness * roughness;
+        float D = ClampEpsilon(GGXDistribution(ClampEpsilon(config.NdotH), alpha));
+        float G = ClampEpsilon(SmithGGXCorrelated(ClampEpsilon(config.NdotL), ClampEpsilon(config.NdotV), roughness * roughness));
+        specularSum += (D * G * fresnel) * wavelengthStep; // Specular contribution
+    }
+    
+    // Normalize the sums
+    fresnelSum /= (maxWavelength - minWavelength);
+    specularSum /= (maxWavelength - minWavelength);
+
+    // Combine diffuse, specular, and Fresnel
+    float3 diffuse = ClampEpsilon(color.rgb) * ClampEpsilon(1.0 - fresnelSum) * ClampEpsilon(1.0 - mat.metalness);
+    return float4(ClampEpsilon(diffuse) + ClampEpsilon(specularSum), 1.0);
+}
+
+float4 QFresnel(float4 c)
+{
+    return QFresnel(c, CreateMaterial(MaterialIndex));
+}
+float3 QFresnel(float3 c)
+{
+    return QFresnel(float4(c, 1.0)).xyz;
+}
+
+float2 QFresnel(float2 c)
+{
+    return QFresnel(float4(c, c)).xy;
+}
+
+float QFresnel(float c)
+{
+    return QFresnel(float4(c, c, c, 1.0)).r;
+}
+
+float2 ComplexIOR(float eta, float plasmaFrequency, float collisionFrequency, float wavelength)
+{
+    float3 K = eta.xxx;
+    float3 G = max((plasmaFrequency * plasmaFrequency) / (collisionFrequency * (collisionFrequency + wavelength * wavelength)), epsilon);
+    return float2(eta, sqrt(max(G.r + G.g + G.b, epsilon)));
+}
+
+
+float SigmoidFalloff(float dist, float sigmoid_range, float sigmoid_sharpness)
+{
+    float x = dist / sigmoid_range;
+    return 1.0 / (1.0 + exp(sigmoid_sharpness * (x - 1.0)));
+}
+
+
+// Main Lighting Calculation
+float3 FresnelSchlick(float cosTheta, float3 F0)
+{
+    F0 = ClampEpsilon(F0);
+    cosTheta = ClampEpsilon(cosTheta);
+    return F0 + (1.0 - F0) * pow(1.0 - cosTheta, FresnelPower);
+}
+
+float3 CalculateHemisphereLighting(float3 normal, float3 upColor, float3 downColor)
+{
+    float3 hemisphereLighting = float3(0, 0, 0);
+    
+    // Upward hemisphere
+    hemisphereLighting += upColor * max(0, normal.y);
+    
+    // Downward hemisphere
+    hemisphereLighting += downColor * max(0, -normal.y);
+    
+    return hemisphereLighting;
+}
+
+float3 CalculateGlobalIllumination(float3 pixelPos, float3 normal, float3 upColor, float3 downColor, float3 ambientColor, float ambientIntensity)
+{
+    float3 gi = float3(0, 0, 0);
+    
+    // Ambient term
+    gi += ambientColor * ambientIntensity;
+    
+    // Hemisphere lighting
+    float3 hemisphereLighting = config.NdotV - CalculateHemisphereLighting(normal, upColor, downColor);
+    gi += hemisphereLighting;
+    
+    return gi;
+}
+
+float3 CalculateLighting(
+    float3 normal,
+    float3 lightPos,
+    float3 pixelPos,
+    float shininess,
+    float3 ambientColor,
+    float3 diffuseColor,
+    float3 specularColor,
+    float3 lightColor,
+    float lightIntensity,
+    float screenGamma,
+    MaterialProperties mat,
+    float2 uv,
+    float2 uvOffset)
+{
+    normal = normalize(normal);
+    float3 lightDir = normalize(lightPos - pixelPos);
+    float3 viewDir = normalize(config.viewPos - pixelPos);
+    
+    float distance = length(lightPos - pixelPos);
+    float attenuation = 1.0 / (distance * distance) * (config.depth * 0.5 + 0.5);
+    
+    float3 halfVec = normalize(lightDir + viewDir);
+    float NdotL = ClampEpsilon(dot(normal, lightDir));
+    float NdotV = ClampEpsilon(dot(normal, viewDir));
+    float NdotH = ClampEpsilon(dot(normal, halfVec));
+    float VdotH = ClampEpsilon(dot(viewDir, halfVec));
+    
+    // Specular Distribution
+    float roughness2 = (mat.smoothness * mat.smoothness);
+    float D = GGXDistribution(NdotH, roughness2);
+    float G = SmithGGXCorrelated(NdotL, NdotV, roughness2);
+    
+    // Fresnel
+    float3 F0 = slerp(diffuseColor, mat.baseColor, mat.metalness);
+    float3 F = ClampEpsilon(FresnelSchlick(NdotV, F0));
+    
+    // Combine into final color
+    float3 diffuse = diffuseColor * (1 - F) * mat.baseColor / PI;
+    float3 specular = saturate((max(0.1, D) * max(0.1, G) * max(0.1, F)) * lightColor * lightIntensity * attenuation);
+    float3 color = saturate(diffuse + specular);
+    
+    // Apply gamma correction
+    return pow(
+        (slerp(
+            mir2D(diffuseMap, config.uv),
+            mir2D(rtMap1, config.uv), 0.5).xyz +
+        specular) * (1 + CalculateGlobalIllumination(pixelPos, normal, color, float3(1, 1, 1), ambientColor, 1)), 1.0 / screenGamma);
+}
+
+float4 CalculateMaterialLighting(
+    float3 diffuse,
+    float3 pixelPos,
+    float3 normal,
+    float3 viewDir,
+    MaterialProperties mat,
+    float3 attenuation,
+    float aberrationStrength,
+    float2 uv,
+    float2 uvOffset)
+{
+    normal = normalize(normal);
+    float3 lightDir = normalize(config.sunPos - pixelPos);
+    
+    float distance = length(config.sunPos - pixelPos);
+    distance *= distance; // Square distance for attenuation
+    
+    float3 halfVec = normalize(lightDir + viewDir);
+    float NdotL = ClampEpsilon(dot(normal, lightDir));
+    float NdotV = ClampEpsilon(dot(normal, viewDir));
+    float NdotH = ClampEpsilon(dot(normal, halfVec));
+    float VdotH = ClampEpsilon(dot(viewDir, halfVec));
+    
+    float4 lighting = float4(CalculateLighting(normal, config.sunPos, pixelPos, aberrationStrength, slerp(float3(0.02, 0.02, 0.02), float3(0.07, 0.07, 0.07), 1 - config.depth), diffuse, mat.baseColor, diffuse + mat.baseColor, 0.5, 1, mat, uv, uvOffset), 1);
+    
+    return float4(diffuse, 1) * lighting;
+}
+
+float3 RefractRay(float3 rayDirection, float3 normal, float refractiveIndex)
+{
+    // Ensure vectors are normalized
+    rayDirection = normalize(rayDirection);
+    normal = normalize(normal);
+
+    float cosI = ClampEpsilon11(dot(-rayDirection, normal));
+
+    // Handle edge cases for incident angles
+    if (abs(cosI - 1.0) < epsilon || abs(cosI + 1.0) < epsilon)
+        return reflect(rayDirection, normal); // Grazing incidence or facing directly
+
+    float sinT2 = refractiveIndex * refractiveIndex * (1.0 - cosI * cosI);
+    if (sinT2 > 1.0) // Total internal reflection
+        return reflect(rayDirection, normal);
+
+    float cosT = sqrt(max(0.0, 1.0 - sinT2));
+    return refractiveIndex * rayDirection + (refractiveIndex * cosI - cosT) * normal;
+}
+
+float3 RefractRayByAngle(float3 incidentRay, float3 normal, float refractedAngle)
+{
+    float3 refractedRay;
+    float cosIncidentAngle = ClampEpsilon11(dot(-incidentRay, normal));
+    float sinRefractedAngle = sin(refractedAngle);
+
+    if (cosIncidentAngle < 0)
+    {
+        // Handle total internal reflection if necessary
+        cosIncidentAngle = -cosIncidentAngle;
+        normal = -normal;
+    }
+
+    float sinIncidentAngle = sqrt(1.0 - cosIncidentAngle * cosIncidentAngle);
+    if (sinIncidentAngle / sinRefractedAngle > 1.0)
+    {
+        // Total internal reflection
+        refractedRay = reflect(incidentRay, normal);
+    }
+    else
+    {
+        float cosRefractedAngle = sqrt(1.0 - sinRefractedAngle * sinRefractedAngle);
+        refractedRay = sinRefractedAngle * -normalize(cross(normal, cross(-normal, incidentRay))) - cosRefractedAngle * normal;
+    }
+
+    return refractedRay;
+}
+
+float CalculateIncidentAngle(float3 incidentRay, float3 normal)
+{
+    return ClampEpsilon11(dot(-normalize(incidentRay), normalize(normal)));
+}
+
+float CalculateRefractedAngle(float3 incidentRay, float3 normal, float refractiveIndex1, float refractiveIndex2)
+{
+    // Validate refractive indices
+    if (refractiveIndex1 <= 0.0 || refractiveIndex2 <= 0.0)
+        return 0.0; // Invalid indices return zero angle
+
+    // Normalize inputs
+    normal = normalize(normal);
+    incidentRay = normalize(incidentRay);
+
+    // Calculate cosine of the incident angle using the dot product
+    float cosIncidentAngle = dot(-incidentRay, normal);
+
+    // Edge cases for incident angle
+    if (abs(cosIncidentAngle) < epsilon)
+        return 0.0; // Grazing incidence
+    if (abs(cosIncidentAngle - 1.0) < epsilon)
+        return PI / 2; // Perpendicular incidence
+
+    // Calculate sine of incident and refracted angles
+    float sinIncidentAngle = sqrt(max(0.0, 1.0 - cosIncidentAngle * cosIncidentAngle));
+    float sinRefractedAngle = (refractiveIndex1 / refractiveIndex2) * sinIncidentAngle;
+
+    // Check for total internal reflection
+    if (sinRefractedAngle > 1.0)
+        return PI / 2; // Angle of 90 degrees for total internal reflection
+
+    float cosRefractedAngle = sqrt(max(0.0, 1.0 - sinRefractedAngle * sinRefractedAngle));
+    return acos(clamp(cosRefractedAngle, -1.0, 1.0));
+}
+
+// Linear interpolation function
+float LinearInterpolate(float x, float x0, float y0, float x1, float y1)
+{
+    return y0 + (x - x0) * (y1 - y0) / (x1 - x0);
+}
+
+float3 RefractRay(float3 incidentRay, float3 normal, float n1, float n2)
+{
+    float cosI = dot(-normalize(incidentRay), normalize(normal));
+    float sinT2 = (n1 / n2) * (n1 / n2) * (1.0 - cosI * cosI);
+    if (sinT2 > 1.0)
+        return reflect(incidentRay, normal); // Total internal reflection condition
+    float cosT = sqrt(1.0 - sinT2);
+    return normalize((n1 / n2) * incidentRay + (n1 / n2 * cosI - cosT) * normal);
+}
+
+// Example function to calculate spectral intensity (simplified)
+float CalculateIntensity(MaterialProperties mat, float wavelength, float sourceIntensity)
+{
+    float refractiveIndex = CalculateRefractiveIndexUsingSellmeier(mat, wavelength);
+    float transmission = 0.99; // Assume 90% transmission for simplification
+
+    // Incorporate dispersion effects (simplified)
+    float dispersionEffect = ClampEpsilon11(refractiveIndex - 1.0); // Simplified dispersion effect
+
+    return ClampEpsilon11(sourceIntensity * transmission - dispersionEffect);
+}
+
+float Falloff(float distance, float radius, float exponent)
+{
+    return pow(1.0 - ClampEpsilon11(distance / radius), exponent);
+}
+
+float3 DiffuseLighting(float3 normal, float3 lightDir, float3 lightColor, float fresnel, float lightIntensity)
+{
+    float diffFactor = saturate(ClampEpsilon11(dot(normal, lightDir)));
+    return (1.0 - fresnel) * diffFactor * lightColor * lightIntensity;
+}
+
+float4 CombineLighting(float4 diffuse, float4 reflection)
+{
+    return diffuse + reflection;
+}
+
+float ScaleRange(float value, float minRange, float maxRange)
+{
+    return minRange + (value * (maxRange - minRange));
+}
+
+
+float scaleRange(float value, float minRange, float maxRange)
+{
+    return minRange + (value * (maxRange - minRange));
+}
+
+
+
+float ConeDistanceToSphere(vec3 coneTip, vec3 coneDir, float coneAngle, vec3 sphereCenter, float sphereRadius)
+{
+    vec3 v = sphereCenter - coneTip;
+    float d = ClampEpsilon11(dot(normalize(v), normalize(coneDir)));
+    float h = length(v) * sin(acos(d / length(v)) - coneAngle);
+    return max(0.0, h - sphereRadius);
+}
+
+
+bool PointInsideCone(vec3 p, vec3 coneTip, vec3 coneDir, float coneAngle)
+{
+    vec3 v = p - coneTip;
+    float d = dot(normalize(v), normalize(coneDir));
+    float h = length(v) * sin(acos(d / length(v)) - coneAngle);
+    return h <= 0.0;
+}
+
+vec3 palette(float t)
+{
+    vec3 a = vec3(0.5, 0.5, 0.5);
+    vec3 b = vec3(0.5, 0.5, 0.5);
+    vec3 c = vec3(1.0, 1.0, 1.0);
+    vec3 d = vec3(0.263, 0.416, 0.557);
+
+    return a + b * cos(6.28318 * (c * t + d));
+}
+
+
+vec3 ProjectPointInsideCone(vec3 p, vec3 coneTip, vec3 coneDir, float coneAngle)
+{
+    vec3 v = p - coneTip;
+    float d = dot(normalize(v), normalize(coneDir));
+    float h = length(v) * sin(acos(d / length(v)) - coneAngle);
+    return p - h * normalize(coneDir);
+}
+
+
+void UpdateConfig(inout GradientModulationConfig config, float2 uv, float3 viewPos)
+{
+    float2 uvDelta = uv - config.uv;
+    
+    config.uv = uv;
+    config.diffuse = mir2D(diffuseMap, config.uv);
+    
+    config.depth = length(uvDelta) * dep2D(config.oosz, depthMap, config.uv);
+    config.gradient = GetGradient(uv);
+    
+    config.invDepth = length(uvDelta) * (1 - config.depth);
+    
+    config.pixelScaled = vec3(config.uv, config.depth);
+    config.viewDir = normalize(config.viewPos - config.pixelScaled);
+    vec3 centerScaled = vec3(vec2(.5, .5), length(uvDelta) * dep2D(config.oosz, depthMap, vec2(.5, .5)));
+    config.centerDist = distance(config.pixelScaled, centerScaled);
+    config.viewDist = distance(config.pixelScaled, config.viewPos);
+    config.modulation = GetModulation(depthMap, config.uv);
+
+    config.normal = config.normal0 = normal2D(normalMap, config.uv);
+    //config.normal = float4(GetNormal2(config.oosz, depthMap, config.uv, normalRadius, config.modulation).xyz, 1);
+    
+    config.pixelToSunSegment = config.sunPos - vec3(config.uv, config.depth);
+    config.pixelToSunDir = normalize(config.pixelToSunSegment);
+
+    config.sunHalfVec = normalize(config.pixelToSunDir + config.viewDir);
+    config.HdotV = ClampEpsilon(dot(config.sunHalfVec, config.viewDir));
+    config.VdotL = ClampEpsilon(dot(config.pixelToSunDir, config.viewDir));
+    config.NdotH = ClampEpsilon(dot(config.sunHalfVec, config.normal));
+    config.NdotV = ClampEpsilon(dot(config.normal, config.viewDir));
+    config.NdotL = ClampEpsilon(dot(config.pixelToSunDir, config.normal));
+
+    config.reflectDir = normalize(reflect(-config.viewDir, config.normal));
+    config.reflectFactor = ClampEpsilon(dot(config.reflectDir, config.viewDir));
+    
+    config.depthCross = CrossLRUDf(config.oosz, depthMap, config.uv, normalRadius);
+    config.depthRange = variation(config.depthCross);
+    
+}
+
+
+
+GradientModulationConfig InitializeConfig(float2 oosz, float timeFactor, float2 uv0, float2 ooszd, float2 ooszrt, float3 viewPos)
+{
+    
+    ivec2 isz;
+    depthMap.GetDimensions(isz.x, isz.y); // Get the dimensions of the depth map texture
+    config.isz = isz;
+    config.uv0 = config.uv = uv0;
+  
+    config.timeFactor = timeFactor;
+    
+    config.diffuse = config.diffuse0 = mir2D(diffuseMap, config.uv);
+    config.oosz = oosz;
+    config.ooszd = ooszd;
+    config.ooszrt = ooszrt;
+    
+    config.depth = config.depth0 = dep2D(config.uv);
+    
+    config.viewPos = config.viewPos0 = vec3(viewPos.xy + config.uv, config.depth + viewPos.z);
+    
+    config.sunPos = float3(f1, f2, SunZ);
+    
+    
+    config.gradient = config.gradient0 = GetGradient(uv0);
+    
+    
+    config.invDepth = (1 - config.depth);
+    
+    config.pixelScaled = config.pixel0Scaled = vec3(config.uv, config.depth);
+    
+    config.modulation = config.modulation0 = GetModulation(depthMap, config.uv);
+    config.normal = config.normal0 = normal2D(normalMap, config.uv);
+    //config.normal = config.normal0 = float4(GetNormal2(config.oosz, depthMap, config.uv, normalRadius, config.modulation).xyz, 1);
+    //normal2D(normalMap, config.uv, config.modulation);
+    // GetNormal(oosz, normalMap, config.uv0, normalRadius, config.modulation);
+    vec3 centerScaled = vec3(vec2(.5, .5), dep2D(oosz, depthMap, vec2(.5, .5)));
+    
+    config.centerDist0 = config.centerDist = distance(config.pixelScaled, centerScaled);
+    config.viewDist = distance(config.pixelScaled, config.viewPos);
+    config.viewDir = config.viewDir0 = normalize(config.viewPos - vec3(config.uv, config.depth));
+    config.pixelToSunSegment = config.pixel0ToSunSegment = config.sunPos - vec3(config.uv, config.depth);
+    config.pixelToSunDir = config.pixel0ToSunDir = normalize(config.pixelToSunSegment);
+
+    config.sunHalfVec = normalize(config.pixelToSunDir + config.viewDir);
+    config.HdotV = ClampEpsilon(dot(config.sunHalfVec, config.viewDir));
+    config.VdotL = ClampEpsilon(dot(config.pixelToSunDir, config.viewDir));
+    config.NdotH = ClampEpsilon(dot(config.sunHalfVec, config.normal));
+    config.NdotV = ClampEpsilon(dot(config.normal, config.viewDir));
+    config.NdotL = ClampEpsilon(dot(config.pixelToSunDir, config.normal));
+
+    config.reflectDir = normalize(reflect(-config.viewDir, config.normal));
+    config.reflectFactor = ClampEpsilon(dot(config.reflectDir, config.viewDir));
+
+    
+    config.depthCross = CrossLRUDf(config.oosz, depthMap, config.uv, normalRadius);
+    config.depthRange = variation(config.depthCross);
+    
+    return config;
+}
+
+
+
+
+float4 CalculateOcclusionFactor(vec2 oosz, vec2 uv, float d, float normalOcclusionFactor, float2 gradientModulation, GradientModulationConfig config)
+{
+    float sd = (d);
+    float4 ret = 0;
+    float tot = 0;
+    float dist = 1;
+    float diffRange = (sd - OCCLUSION_MIN_DIFFERENCE);
+    [unroll(10)]
+    for (int dx = -2; dx <= 2; ++dx)
+    {
+        [unroll(10)]
+        for (int dy = -2; dy <= 2; ++dy)
+        {
+            if (dx == 0 || dy == 0)
+                continue;
+            
+            float weight = 1 / (1 + length(float2(dx, dy)));
+            float2 offset = float2(dx, dy) * (dist / 2) * weight;
+            
+            float td = dep2D(oosz, depthMap, uv + offset * oosz * gradientModulation);
+            if (td < diffRange)
+            {
+                ret += weight * (sd - td);
+                tot += weight;
+            }
+        }
+    }
+    return tot == 0 ? 0 : ClampEpsilon11(ret / tot);
+}
+// HLSL syntax for a Gaussian Bloom effect
+
+
+
+
+// Gaussian bloom implementation
+float4 GaussianBloom(float2 oosz, Texture2D tex, float2 uv, float dist, float threshold, float4 minColor, float3 power, float sigma)
+{
+    // Sample the original texture
+    float4 color = mir2D(tex, uv);
+
+    // Initialize variables for Gaussian blur
+    float4 blurColor = float4(0.0, 0.0, 0.0, 0.0);
+    float totalWeight = 0.0;
+    int radius = min(10, max(1, dist / 2));
+    
+    // Apply Gaussian blur in a 3x3 kernel around the pixel
+    [unroll(10)]
+    for (int dx = -radius; dx <= radius; ++dx)
+    {
+        [unroll(10)]
+        for (int dy = -radius; dy <= radius; ++dy)
+        {
+            if (dx == 0 || dy == 0)
+                continue;
+           
+            float2 offset = float2(dx, dy) * dist;
+            float weight = Gaussian(length(offset), sigma);
+            blurColor += weight * mir2D(tex, uv + offset * oosz);
+            totalWeight += weight;
+        }
+    }
+    blurColor /= totalWeight;
+
+    // Dynamic blending based on brightness and threshold
+    float brightness = max(max(blurColor.r, blurColor.g), blurColor.b);
+    if (brightness >= threshold)
+    {
+        float blendedColorR = slerp(color.x, max(minColor.x, (blurColor.x + brightness)), power.x);
+        float blendedColorG = slerp(color.y, max(minColor.y, (blurColor.y + brightness)),
+           power.y);
+        float blendedColorB = slerp(color.z, max(minColor.z, (blurColor.z + brightness)), power.z);
+        
+        return float4(float3(blendedColorR, blendedColorG, blendedColorB), 1);
+    }
+
+    return color; // Return the original color if below the threshold
+}
+
+
+
+// bloom2 function
+float4 bloom2(float2 oosz, Texture2D tex, float2 uv, float dist, float threshold, float2 modulation, float2 gradient)
+{
+  // Sample the original texture
+    float4 color = mir2D(tex, uv);
+
+  // Blur the color
+    float4 blurColor = mir2D(tex, uv + float2(-dist, -dist) * 0.5f * oosz * modulation)
+    + mir2D(tex, uv + float2(dist, dist) * 0.5f * oosz * modulation)
+    + mir2D(tex, uv + float2(-dist, dist) * 0.5f * oosz * modulation)
+    + mir2D(tex, uv + float2(dist, -dist) * 0.5f * oosz * modulation)
+    + mir2D(tex, uv + float2(-dist, 0.0f) * oosz * modulation)
+    + mir2D(tex, uv + float2(dist, 0.0f) * oosz * modulation)
+    + mir2D(tex, uv + float2(0.0f, -dist) * oosz * modulation)
+    + mir2D(tex, uv + float2(0.0f, dist) * oosz * modulation);
+
+  // Average the blur samples
+    blurColor *= 0.5 / 8.0;
+
+  // Blend with original color if exceeds threshold
+    if (max(max(color.r, color.g), color.b) > threshold)
+    {
+        color += blurColor;
+    }
+
+    return ClampEpsilon(color);
+}
+
+
+
+vec4 RedBlueDepthEffect(vec2 oosz, Texture2D tex, vec2 uv, float depth, vec2 eyeOffsetPixelsLeftRight, vec4 diffuseColor, float2 modulation, float strength)
+{
+    // Calculate left and right eye uv coordinates
+    vec2 ofsL = float2(-eyeOffsetPixelsLeftRight.x, 0) * oosz * ClampEpsilon(depth) * modulation;
+    vec2 ofsR = float2(eyeOffsetPixelsLeftRight.y, 0) * oosz * ClampEpsilon(depth) * modulation;
+    
+    vec2 leftUV = uv + ofsL;
+    vec2 rightUV = uv + ofsR;
+    
+    // Sample the scene from the perspective of each eye
+    float leftEyeColor = mir2D(tex, leftUV).r;
+    float rightEyeColor = mir2D(tex, rightUV).b;
+    
+    vec4 ret = vec4(slerp(diffuseColor.xyz, vec3(leftEyeColor,
+            diffuseColor.g,
+            rightEyeColor), strength),
+            1);
+    
+   
+    return ret;
+}
+
+
+float4 ColorSaturation(float4 color, float saturation)
+{
+    float luminance = ClampEpsilon(dot(color.rgb, float3(0.2126, 0.7152, 0.0722)));
+    float3 grey = float3(luminance, luminance, luminance);
+    float3 correctedColor = slerp(grey, color.rgb, saturation);
+    return float4(correctedColor, color.a);
+}
+
+float4 ColorWhiteBalance(float4 color, float temperature, float tint)
+{
+    // Convert temperature and tint to scale factors
+    float3 tempColor = float3(temperature, temperature, 1.0 - temperature);
+    float3 tintColor = float3(1.0 - tint, tint, 1.0 - tint);
+
+    float3 correctedColor = color.rgb * tempColor * tintColor;
+    return float4(correctedColor, color.a);
+}
+
+
+struct ParallaxLayerResult
+{
+    float2 uv;
+    int isValid;
+    int isCompleted;
+};
+void InitializeParallaxLayerResult(inout ParallaxLayerResult ret)
+{
+    ret.uv = vec2(0, 0);
+    ret.isCompleted = 0;
+    ret.isValid = 0;
+}
+
+float3 ChromaticDispersion(float3 rayDir, float3 prismNormal, float eta)
+{
+    float3 refractedRay = refract(rayDir, prismNormal, eta);
+    return float3(refractedRay.x, refractedRay.y, rayDir.z); // Separate R, G, B channels
+}
+
+float3 RayleighScattering(float3 rayDir, float3 pixelToSunDir, float atmosphereDensity)
+{
+    return atmosphereDensity * pow(ClampEpsilon(dot(-rayDir, pixelToSunDir)), 2.0);
+}
+
+
+
+float RadicalInverse(uint x)
+{
+    // Reverse the bits of x
+    x = (x << 16) | (x >> 16);
+    x = ((x & 0x00ff00ff) << 8) | ((x & 0xff00ff00) >> 8);
+    x = ((x & 0x0f0f0f0f) << 4) | ((x & 0xf0f0f0f0) >> 4);
+    x = ((x & 0x33333333) << 2) | ((x & 0xcccccccc) >> 2);
+    x = ((x & 0x55555555) << 1) | ((x & 0xaaaaaaaa) >> 1);
+    // Divide by 2^32
+    return float(x) * 2.3283064365386963e-10;
+}
+
+// Returns the Hammersley point set of size n
+float2 Hammersley(uint i, uint n)
+{
+    return float2(float(i) / float(n), RadicalInverse(i));
+}
+    
+float3 BokehDOF(float2 oosz, float2 uv, Texture2D<float> depthTex, Texture2D sceneTex, float focusDepth, float bokehRadius, float2 gradientModulation)
+{
+    float depth = dep2D(oosz, depthTex, uv);
+    float circleOfConfusion = abs(depth - focusDepth) * bokehRadius;
+    float3 color = float3(0, 0, 0);
+    int samples = 8; // Customize as needed
+    for (int i = 0; i < samples; i++)
+    {
+        float2 sampleUV = uv + Hammersley(i, samples) * circleOfConfusion;
+        color += mir2D(sceneTex, sampleUV).rgb;
+    }
+    return color / samples;
+}
+
+float3 SubsurfaceScattering(float3 position, float3 lightDir, float scatterStrength)
+{
+    float3 scatterColor = float3(0.8, 0.7, 0.6); // Customize as needed
+    float s = ClampEpsilon(dot(normalize(position), lightDir));
+    float scatter = exp(-scatterStrength * (1.0 - s));
+    return slerp(float3(1, 1, 1), scatterColor, scatter);
+}
+
+
+
+
+float MicrofacetSpecular(float3 lightDir, float3 viewDir, float3 normal, float roughness)
+{
+    float3 halfDir = normalize(lightDir + viewDir);
+    float D = roughness / (PI * pow(ClampEpsilon(dot(normal, halfDir)), 2) * pow(roughness + (1 - roughness) * pow(ClampEpsilon(dot(normal, halfDir)), 2), 2));
+    float G = min(1.0, min(2 * ClampEpsilon(dot(normal, halfDir)) * ClampEpsilon(dot(normal, viewDir)) / ClampEpsilon(dot(viewDir, halfDir)), 2 * ClampEpsilon(dot(normal, halfDir)) * ClampEpsilon(dot(normal, lightDir)) / ClampEpsilon(dot(viewDir, halfDir))));
+    return D * G / ClampEpsilon11(4 * ClampEpsilon(dot(normal, lightDir)) * ClampEpsilon(dot(normal, viewDir)));
+}
+
+
+
+float SSAO(float2 oosz, Texture2D<float> depthTex, float2 uv, float radius, float AO_DEPTH_THRESHOLD)
+{
+    float depthCenter = dep2D(oosz, depthTex, uv);
+    float ao = 0.0;
+
+    for (int x = -radius; x <= radius; x++)
+    {
+        for (int y = -radius; y <= radius; y++)
+        {
+            float2 offset = float2(x, y) * oosz;
+            float sampleDepth = dep2D(oosz, depthTex, uv + offset);
+            ao += (sampleDepth >= depthCenter + AO_DEPTH_THRESHOLD) ? 1 : 0;
+        }
+    }
+    return 1.0 - (ao / ((2 * radius + 1) * (2 * radius + 1)));
+}
+
+float3 EdgeDetectionGlow(Texture2D tex, float2 uv, float edgeIntensity)
+{
+    // Sobel filter kernel definitions
+    float3x3 sobelX = float3x3(-1, 0, 1, -2, 0, 2, -1, 0, 1);
+    float3x3 sobelY = float3x3(-1, -2, -1, 0, 0, 0, 1, 2, 1);
+
+    float3 edgeColor = float3(0.0, 0.0, 0.0);
+    float3 normalColor = mir2D(tex, uv).rgb;
+    float edgeDetectionThreshold = 0.1; // Threshold for edge detection
+
+    // Sobel edge detection
+    float gx = 0.0;
+    float gy = 0.0;
+    [unroll(10)]
+    for (int x = -1; x <= 1; x++)
+    {
+        [unroll(10)]
+        for (int y = -1; y <= 1; y++)
+        {
+            float3 sampleColor = mir2D(tex, uv + float2(x, y) * 0.002).rgb; // 0.002 is a sample offset value
+            gx += ClampEpsilon(dot(sampleColor, sobelX[x + 1][y + 1]));
+            gy += ClampEpsilon(dot(sampleColor, sobelY[x + 1][y + 1]));
+        }
+    }
+
+    float edgeMagnitude = sqrt(gx * gx + gy * gy);
+    bool isEdge = edgeMagnitude > edgeDetectionThreshold;
+
+    // Apply glowing effect on edges
+    if (isEdge)
+    {
+        // Glowing effect - this could be a neon or spectral color shift
+        float glowStrength = sin(edgeMagnitude * edgeIntensity) * 0.5 + 0.5;
+        edgeColor = slerp(normalColor, float3(0.0, 0.8, 1.0), glowStrength); // Example: Glowing cyan color
+    }
+
+    return isEdge ? edgeColor : normalColor;
+}
+
+
+float3 HolographicRainbowColor(float3 viewDir, float3 particleNormal)
+{
+    float hueShift = atan2(viewDir.y, viewDir.x) / (2.0 * PI);
+    float hue = frac(ClampEpsilon11(dot(viewDir, particleNormal)) + hueShift);
+    
+    return HueToRGB(hue); // Convert hue to RGB using a suitable function
+}
+
+
+
+// Advanced Iridescent Shift with Fresnel and Noise
+float3 IridescentShift(float2 oosz, float2 uv, float3 normal, float3 viewDir, float thickness, float shiftStrength)
+{
+    // Fresnel term for angle-based reflectance
+    float fresnel = pow(abs(1.0 - ClampEpsilon(dot(normal, viewDir))), thickness);
+    
+    // Shift value modulated by noise for irregular surface simulation
+    float noisev = randNoise(uv) * dep2D(oosz, depthMap, uv) * (1 - length(mir2D(diffuseMap, uv).rgb / 3));
+    float shift = fresnel * (1.0 + noisev) * shiftStrength;
+    
+    // Color calculation with phase shift for iridescence
+    float3 colorShift = float3(0.05, .033, 0.07) * shift; // Adjust the base shift values as needed
+  
+    return colorShift;
+}
+
+// Function 2: Dichroic Reflection
+float3 DichroicReflection(float3 normal, float3 viewDir, float reflectivity)
+{
+    float angle = ClampEpsilon(dot(normal, viewDir));
+    float reflectance = reflectivity * pow(1.0 - angle, 2.0);
+    float3 color = slerp(float3(1.0, 0.0, 0.0), float3(0.0, 0.0, 1.0), reflectance);
+    return color;
+}
+
+// Function 3: Rayleigh Scattering Simulation
+float3 RayleighScattering2(float3 lightDir, float3 viewDir, float atmosphereThickness)
+{
+    float scatter = pow(abs(ClampEpsilon(dot(lightDir, viewDir)) + 1.0), atmosphereThickness);
+    float3 color = scatter * float3(0.5, 0.7, 1.0); // Blueish tint, typical for Rayleigh scattering
+    return color;
+}
+
+
+float4 ChromaColor(float2 oosz, Texture2D<float4> diffuseMap, Texture2D<float> depthMap, Texture2D<float3> normalMap, float2 uv, float2 gradient, float depth, float2 modulation, float3 normal)
+{
+    float4 ret = mir2D(diffuseMap, uv);
+    
+    float3 iridescentColor = IridescentShift(oosz, uv, normal, config.viewDir, depth, PerlinNoise(float3((config.uv) * depth * length(config.uv - 0.5) * modulation, cos(depth * TotalTime * timr) * 0.2 + 0.8)));
+    float3 rayleighColor = RayleighScattering2(config.pixelToSunDir, config.viewDir, depth);
+    
+    ret = saturate(float4(iridescentColor + rayleighColor, 1.0));
+    
+    return ret;
+}
+
+
+struct ParallaxResult
+{
+    float2 uv;
+    float depth;
+    float4 color;
+};
+
+ParallaxResult CreateParallaxResult()
+{
+    ParallaxResult ret;
+    ret.uv = float2(0, 0);
+    ret.depth = 0;
+    ret.color = float4(0, 0, 0, 1);
+    return ret;
+}
+// Improved Parallax Occlusion function
+ParallaxResult ParallaxOcclusion(
+    float2 oosz,
+    Texture2D<float> depthMap,
+    float2 uv,
+    float2 offset,
+    float2 offset2,
+    int numLayers
+)
+{
+    numLayers = max(1, numLayers);
+    
+    // Initialize the result structure
+    ParallaxResult result = CreateParallaxResult();
+    result.uv = uv;
+
+    // Calculate the initial depth value
+    result.depth = dep2D(depthMap, uv);
+    
+    // Initialize variables for the loop
+    float layerDepth = result.depth;
+    float depthStep = 1.0f / numLayers;
+
+    // Pre-calculate gradients to avoid repetitive calculations
+    float2 modulation = GetModulation(depthMap, uv);
+    
+    [unroll(10)]
+    for (int i = 0; i < numLayers; i++)
+    {
+        float2 ofs1 = offset * modulation;
+        float2 ofs2 = offset2 * modulation;
+        
+        float2 newUV = result.uv + slerp(ofs2, ofs1, result.depth * ((i + 1) / numLayers));
+
+        // Calculate the new depth value
+        float newDepth = dep2D(depthMap, newUV);
+
+        // Check if the new depth value is less than or equal to the current depth value
+        if (newDepth <= result.depth - 0.001)
+        {
+            result.depth = newDepth;
+        }
+        result.uv = newUV;
+        modulation = GetModulation(depthMap, result.uv);
+        // Update layer depth for the next iteration
+        layerDepth += depthStep;
+    }
+
+    // Return the result structure
+    return result;
+}
+
+
+
+// Function 2: Chromatic Aberration Simulation
+float3 ChromaticAberration(float2 oosz, Texture2D tex, float3 color, float2 uv, float2 aberrationOffset)
+{
+    // Simulates chromatic aberration by slightly offsetting the color channels
+    float2 redOffset = uv + float2(aberrationOffset.x, 0);
+    float2 greenOffset = uv;
+    float2 blueOffset = uv - float2(aberrationOffset.y, 0);
+    float red = mir2D(tex, redOffset).r;
+    float green = mir2D(tex, greenOffset).g;
+    float blue = mir2D(tex, blueOffset).b;
+    return saturate(float4(color * float3(red, green, blue), 1)).xyz;
+}
+
+float calculateFresnel(float surfaceDot, float indexOfRefraction)
+{
+    float cosi = ClampEpsilon(surfaceDot);
+    float etai = 1.0;
+    float etat = ClampEpsilon(indexOfRefraction);
+
+    if (cosi > 0.0)
+    {
+        float temp = etai;
+        etai = etat;
+        etat = temp;
+    }
+
+    float sint = etai / etat * sqrt(max(epsilon, 1.0f - cosi * cosi));
+
+    if (sint >= 1.0)
+    {
+        return 1.0;
+    }
+
+    float cost = sqrt(max(epsilon, 1.0f - sint * sint));
+    cosi = abs(cosi);
+
+    float Rs = ((etat * cosi) - (etai * cost)) / ((etat * cosi) + (etai * cost));
+    float Rp = ((etai * cosi) - (etat * cost)) / ((etai * cosi) + (etat * cost));
+
+    return float(Rs * Rs + Rp * Rp) / 2.0;
+}
+
+float3 ApplyChromaticAberration(float2 oosz, MaterialProperties mat, float2 uv, float2 uvOffset, float2 colorShiftOffset, Texture2D diffuseMap, Texture2D<float3> normalMap, Texture2D<float> depthMap, float aberrationStrength)
+{
+    float3 pixel = float3(uv, dep2D(depthMap, uv));
+    float3 normal = normal2D(normalMap, pixel.xy);
+    float3 viewDir = normalize(config.viewPos - pixel);
+    float3 center = mir2D(diffuseMap, pixel.xy).xyz;
+
+    float3 c = float3(
+        slerp(center.r, mir2D(diffuseMap, uv + colorShiftOffset).r, aberrationStrength),
+        center.g,
+        slerp(center.b, mir2D(diffuseMap, uv - colorShiftOffset).b, aberrationStrength)
+    );
+
+    return slerp(c, CalculateMaterialLighting(c, pixel, normal, viewDir, mat, attenuationSun(), aberrationStrength, uv, uvOffset).xyz, config.NdotV);
+}
+
+float3 ApplyChromaticAberration(float2 oosz, MaterialProperties mat, float2 uv, float2 uvOffset, float2 colorShiftOffset, Texture2D diffuseMap, Texture2D<float4> normalMap, Texture2D<float4> depthMap, float aberrationStrength)
+{
+    float3 pixel = float3(uv, mir2D(depthMap, uv).r);
+    float3 normal = mir2D(normalMap, pixel.xy).xyz * 2 - 1;
+    float3 viewDir = normalize(config.viewPos - pixel);
+    float3 center = mir2D(diffuseMap, pixel.xy).xyz;
+
+    float3 c = float3(
+        slerp(center.r, mir2D(diffuseMap, uv + colorShiftOffset).r, aberrationStrength),
+        center.g,
+        slerp(center.b, mir2D(diffuseMap, uv - colorShiftOffset).b, aberrationStrength)
+    );
+
+    return slerp(c, CalculateMaterialLighting(c, pixel, normal, viewDir, mat, attenuationSun(), aberrationStrength, uv, uvOffset).xyz, config.NdotV);
+}
+float4 BaseReflectivityFromIndexOfRefraction(float4 ior)
+{
+    return pow((ior - 1) / max(0.0001, (ior + 1)), 2);
+}
+
+
+static const float WAVELENGTH_MIN = 380.0;
+static const float WAVELENGTH_MAX = 780.0;
+static const int MAX_BOUNCES = 2;
+static const int NUM_SAMPLES = 16;
+static const int NUM_STRATA = 8;
+
+struct Material
+{
+    float reflection;
+    float transmission;
+    float absorption;
+    float g;
+    float interferenceStrength;
+    float3 referencePoint;
+    float scatteringCoefficient;
+    float3 normal;
+    float refractiveIndex;
+    float3 emission;
+    float3 baseColor;
+    float smoothness;
+    float metalness;
+};
+
+Material ConvertMaterialPropertiesToMaterial(MaterialProperties props, float wavelength)
+{
+    Material material;
+    material.baseColor = props.baseColor;
+    material.smoothness = props.smoothness;
+    material.metalness = props.metalness;
+    material.refractiveIndex = clamp(CalculateRefractiveIndexUsingSellmeier(props, wavelength), 1.001, 5.0);
+    material.g = 0.5;
+    material.interferenceStrength = 0.5 * length(config.modulation);
+    material.referencePoint = config.pixelScaled;
+    material.scatteringCoefficient = 0.2 + config.invDepth * config.HdotV * .5 * props.metalness * config.NdotL * config.NdotV;
+    material.normal = config.normal;
+    material.emission = props.baseColor;
+    material.absorption = 0.2 + (1 - props.metalness);
+    material.reflection = config.VdotL;
+    material.transmission = 0.8 + props.metalness;
+    return material;
+}
+
+struct Surface
+{
+    bool hit;
+    Material material;
+};
+
+static const float PLANCK_CONSTANT = 6.62607015e-34;
+static const float SPEED_OF_LIGHT = 299792458.0;
+static const float ELECTRON_CHARGE = 1.602176634e-19;
+static uint stratifiedSampleIndex;
+
+struct PhotonState
+{
+    float3 position;
+    float3 direction;
+    float wavelength;
+    float probability;
+};
+
+float HenyeyGreensteinPhaseFunction(float g, float cosTheta)
+{
+    float denom = 1.0 + g * g - 2.0 * g * cosTheta;
+    return (1.0 / (4.0 * PI)) * ((1.0 - g * g) / (denom * sqrt(denom)));
+}
+
+float3 CalculateScattering(float3 position, float3 direction, float wavelength, Material material)
+{
+    float scatteringCoefficient = material.scatteringCoefficient;
+    float cosTheta = ClampEpsilon(dot(direction, material.normal));
+    float phaseFunction = HenyeyGreensteinPhaseFunction(material.g, cosTheta);
+    return scatteringCoefficient * phaseFunction * direction;
+}
+
+float2 Hammersley2D(uint index, uint numSamples)
+{
+    float phi = frac(float(index) * 0.618033988749895);
+    return float2(float(index) / float(numSamples), phi);
+}
+
+float StratifiedSampling(float3 position, float3 direction, float wavelength, Material material)
+{
+    float2 sample = Hammersley2D(stratifiedSampleIndex, NUM_STRATA);
+    float phi = 2.0 * PI * sample.x;
+    float cosTheta = 1.0 - 2.0 * sample.y;
+    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+    float3 tangent = normalize(cross(material.normal, float3(1.0, 0.0, 0.0)));
+    float3 bitangent = normalize(cross(material.normal, tangent));
+    direction = normalize(cos(phi) * tangent + sin(phi) * bitangent + cosTheta * material.normal);
+    float cosThetaI = ClampEpsilon(dot(direction, material.normal));
+    return abs(cosThetaI) / PI;
+}
+
+float ImportanceSampling(float3 position, float3 direction, float wavelength, Material material)
+{
+    float3 normal = material.normal;
+    float cosThetaI = ClampEpsilon(dot(direction, normal));
+    return abs(cosThetaI) / PI;
+}
+
+struct Primitive
+{
+    float3 normal;
+    float refractiveIndex;
+    float absorption;
+    float reflection;
+    float3 emission;
+    float3 position;
+    float radius;
+};
+
+const static int numPrimitives = 3;
+const static Primitive primitives[3] =
+{
+    { float3(0.0, 0.0, -1.0), 1.5, 0.1, 0.8, float3(0.0, 1.0, 1.0), float3(0.5, 0.5, 1.0), 0.50 },
+    { float3(0.0, 0.0, -1.0), 1.0, 0.30, 0.2, float3(1.0, 1.0, 1.0), float3(0.250, 0.250, 0.0), 0.50 },
+    { float3(0.0, 0.0, 1.0), 1.3, 0.5, 0.3, float3(0.50, 0.50, 0.0), float3(0.30, 0.30, 0.0), 0.20 }
+};
+
+bool IntersectRayPrimitive(float3 rayOrigin, float3 rayDirection, in Primitive primitive, inout float t)
+{
+    float3 oc = rayOrigin - primitive.position;
+    float a = dot(rayDirection, rayDirection);
+    float b = 2.0f * dot(oc, rayDirection);
+    float c = dot(oc, oc) - primitive.radius * primitive.radius;
+    float discriminant = b * b - 4.0f * a * c;
+
+    if (discriminant < 0.0f)
+    {
+        return false;
+    }
+
+    float sqrt_discriminant = sqrt(discriminant);
+    float t0 = (-b - sqrt_discriminant) / (2.0f * a);
+    float t1 = (-b + sqrt_discriminant) / (2.0f * a);
+
+    if (t0 > t1)
+    {
+        float temp = t0;
+        t0 = t1;
+        t1 = temp;
+    }
+
+    if (t0 < 0.0f)
+    {
+        if (t1 < 0.0f)
+        {
+            return false;
+        }
+        else
+        {
+            t = t1;
+            return true;
+        }
+    }
+    else
+    {
+        t = t0;
+        return true;
+    }
+}
+
+const static float3x3 MATRIX_SRGB_D65 =
+{
+    { 3.2404542, -1.5371385, -0.4985314 },
+    { -0.9692660, 1.8760108, 0.0415560 },
+    { 0.0556434, -0.2040259, 1.0572252 }
+};
+
+#define LEN_MIN 380
+#define LEN_MAX 780
+#define LEN_STEP 5
+
+const static float X[81] =
+{
+    0.000160, 0.000662, 0.002362, 0.007242, 0.019110, 0.043400, 0.084736, 0.140638, 0.204492, 0.264737,
+    0.314679, 0.357719, 0.383734, 0.386726, 0.370702, 0.342957, 0.302273, 0.254085, 0.195618, 0.132349,
+    0.080507, 0.041072, 0.016172, 0.005132, 0.003816, 0.015444, 0.037465, 0.071358, 0.117749, 0.172953,
+    0.236491, 0.304213, 0.376772, 0.451584, 0.529826, 0.616053, 0.705224, 0.793832, 0.878655, 0.951162,
+    1.014160, 1.074300, 1.118520, 1.134300, 1.123990, 1.089100, 1.030480, 0.950740, 0.856297, 0.754930,
+    0.647467, 0.535110, 0.431567, 0.343690, 0.268329, 0.204300, 0.152568, 0.112210, 0.081261, 0.057930,
+    0.040851, 0.028623, 0.019941, 0.013842, 0.009577, 0.006605, 0.004553, 0.003145, 0.002175, 0.001506,
+    0.001045, 0.000727, 0.000508, 0.000356, 0.000251, 0.000178, 0.000126, 0.000090, 0.000065, 0.000046,
+    0.000033
+};
+
+const static float Y[81] =
+{
+    0.000017, 0.000072, 0.000253, 0.000769, 0.002004, 0.004509, 0.008756, 0.014456, 0.021391, 0.029497,
+    0.038676, 0.049602, 0.062077, 0.074704, 0.089456, 0.106256, 0.128201, 0.152761, 0.185190, 0.219940,
+    0.253589, 0.297665, 0.339133, 0.395379, 0.460777, 0.531360, 0.606741, 0.685660, 0.761757, 0.823330,
+    0.875211, 0.923810, 0.961988, 0.982200, 0.991761, 0.999110, 0.997340, 0.982380, 0.955552, 0.915175,
+    0.868934, 0.825623, 0.777405, 0.720353, 0.658341, 0.593878, 0.527963, 0.461834, 0.398057, 0.339554,
+    0.283493, 0.228254, 0.179828, 0.140211, 0.107633, 0.081187, 0.060281, 0.044096, 0.031800, 0.022602,
+    0.015905, 0.011130, 0.007749, 0.005375, 0.003718, 0.002565, 0.001768, 0.001222, 0.000846, 0.000586,
+    0.000407, 0.000284, 0.000199, 0.000140, 0.000098, 0.000070, 0.000050, 0.000036, 0.000025, 0.000018,
+    0.000013
+};
+
+const static float Z[81] =
+{
+    0.000705, 0.002928, 0.010482, 0.032344, 0.086011, 0.197120, 0.389366, 0.656760, 0.972542, 1.282500,
+    1.553480, 1.798500, 1.967280, 2.027300, 1.994800, 1.900700, 1.745370, 1.554900, 1.317560, 1.030200,
+    0.772125, 0.570060, 0.415254, 0.302356, 0.218502, 0.159249, 0.112044, 0.082248, 0.060709, 0.043050,
+    0.030451, 0.020584, 0.013676, 0.007918, 0.003988, 0.001091, 0.000000, 0.000000, 0.000000, 0.000000,
+    0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
+    0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
+    0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
+    0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
+    0.000000
+};
+
+float Interpolate(const float values[81], int index, float offset)
+{
+    if (index < 0)
+        return 0;
+    if (index > 80)
+        return 1;
+    if (offset == 0 || index == 80)
+        return values[index];
+
+    float x0 = index * LEN_STEP;
+    float x1 = x0 + LEN_STEP;
+    float y0 = values[index];
+    float y1 = values[index + 1];
+
+    return slerp(y0, y1, offset / LEN_STEP);
+}
+
+float GammaCorrect_sRGB(float c)
+{
+    if (c <= 0.0031308)
+        return 12.92 * c;
+    float a = 0.055;
+    return (1 + a) * pow(c, 1 / 2.2) - a;
+}
+
+float3 ConvertToRadiance(float len)
+{
+    if (len < LEN_MIN)
+        return float3(0, 0, 0);
+    if (len > LEN_MAX)
+        return float3(1, 1, 1);
+    len -= LEN_MIN;
+    int index = int(floor(len / LEN_STEP));
+    float offset = len - LEN_STEP * index;
+
+    float x = Interpolate(X, index, offset);
+    float y = Interpolate(Y, index, offset);
+    float z = Interpolate(Z, index, offset);
+    float3 rgb = mul(float3(x, y, z), MATRIX_SRGB_D65);
+    rgb.r = saturate(GammaCorrect_sRGB(rgb.r));
+    rgb.g = saturate(GammaCorrect_sRGB(rgb.g));
+    rgb.b = saturate(GammaCorrect_sRGB(rgb.b));
+    return rgb;
+}
+
+float ConvertToWavelength(float3 rgb)
+{
+    float3 hsv = RGBtoHSV(rgb);
+    float hue = hsv.x;
+    float wavelength;
+
+    if (hue >= 0 && hue < 60)
+    {
+        wavelength = slerp(620.0, 590.0, hue / 60.0);
+    }
+    else if (hue >= 60 && hue < 180)
+    {
+        wavelength = slerp(590.0, 495.0, (hue - 60) / 120.0);
+    }
+    else if (hue >= 180 && hue < 240)
+    {
+        wavelength = slerp(495.0, 450.0, (hue - 180) / 60.0);
+    }
+    else if (hue >= 240 && hue < 300)
+    {
+        wavelength = slerp(450.0, 380.0, (hue - 240) / 60.0);
+    }
+    else
+    {
+        wavelength = slerp(380.0, 620.0, (hue - 300) / 60.0);
+    }
+
+    return wavelength;
+}
+
+float3 CalculateRadianceContribution(float3 position, float3 direction, float wavelength, Material material)
+{
+    float3 radianceContribution = 0.0;
+    float reflectivity = ClampEpsilon(material.reflection);
+    float transparency = ClampEpsilon(material.transmission);
+    float angleFactor = ClampEpsilon(dot(direction, config.normal));
+    radianceContribution = ClampEpsilon((reflectivity + transparency) * angleFactor);
+    float wavelengthFactor = 1000.0;
+    radianceContribution *= wavelengthFactor;
+    return radianceContribution;
+}
+
+float3 CalculateExitantRadiance(float3 position, float3 direction, float wavelength, Material material)
+{
+    float3 exitantRadiance = material.emission * ConvertToRadiance(wavelength);
+    float3 incidentRadiance = CalculateRadianceContribution(position, direction, wavelength, material);
+    exitantRadiance += incidentRadiance * material.reflection + material.transmission;
+    return exitantRadiance;
+}
+
+float3 CalculateInterference(float3 position, float3 direction, float wavelength, Material material)
+{
+    float3 pathDifference = position - material.referencePoint;
+    float phaseDifference = 2.0 * PI * ClampEpsilon(dot(pathDifference, direction)) / max(0.0001, wavelength);
+    float3 interference = cos(phaseDifference) * material.interferenceStrength;
+    return interference;
+}
+
+float3 ReflectDirection(float3 direction, float3 normal)
+{
+    return direction - 2.0 * dot(direction, normal) * normal;
+}
+
+float3 QuantumElectrodynamics2(float3 position, float3 direction, float wavelength, Material material, int bounceCount)
+{
+    if (bounceCount >= MAX_BOUNCES)
+        return float3(0.0, 0.0, 0.0);
+
+    // Calculate contributions from radiance, scattering, and interference
+    float3 radiance = CalculateExitantRadiance(position, direction, wavelength, material);
+    float3 scattering = CalculateScattering(position, direction, wavelength, material);
+    float3 interference = CalculateInterference(position, direction, wavelength, material);
+
+    // Combine the contributions
+    float3 combined = radiance + scattering + interference;
+
+    // Calculate the next bounce
+    float3 normal = float3(0.0, 1.0, 0.0); // Assuming an upward normal for simplicity; replace with actual normal calculation
+    float3 reflectedDirection = reflect(direction, normal);
+    float3 nextPosition = position + reflectedDirection * 0.1; // Small step to next position; adjust based on your scene scale
+
+    // Combine the current contribution with the next bounce
+    return combined; // Scale down the next bounce contribution; adjust as needed
+}
+float3 QuantumElectrodynamics(float3 position, float3 direction, float wavelength, Material material, int bounceCount)
+{
+    if (bounceCount >= MAX_BOUNCES)
+        return float3(0.0, 0.0, 0.0);
+
+    // Calculate contributions from radiance, scattering, and interference
+    float3 radiance = CalculateExitantRadiance(position, direction, wavelength, material);
+    float3 scattering = CalculateScattering(position, direction, wavelength, material);
+    float3 interference = CalculateInterference(position, direction, wavelength, material);
+
+    // Combine the contributions
+    float3 combined = radiance + scattering + interference;
+
+    // Calculate the next bounce
+    float3 normal = normal2D(normalMap, position.xy); // Assuming an upward normal for simplicity; replace with actual normal calculation
+    float3 reflectedDirection = ReflectDirection(direction, normal);
+    
+    float3 nextPosition = position + reflectedDirection * 0.1; // Small step to next position; adjust based on your scene scale
+
+    // Combine the current contribution with the next bounce
+    return combined; // Scale down the next bounce contribution; adjust as needed
+}
+
+
+
+inline float getDot(int index)
+{
+    switch (index % 5)
+    {
+        case 0:
+            return config.NdotV;
+        case 1:
+            return config.VdotL;
+        case 2:
+            return config.NdotL;
+        case 3:
+            return config.HdotV;
+        case 4:
+            return config.NdotH;
+        default:
+            return 0;
+    };
+}
+
+
+inline float sumDot4(int index)
+{
+    return getDot(index) + getDot(index + 1) + getDot(index + 2) + getDot(index + 3);
+}
+inline float sumDot3(int index)
+{
+    return getDot(index) + getDot(index + 1) + getDot(index + 2);
+}
+inline float sumDot2(int index)
+{
+    return getDot(index) + getDot(index + 1);
+}
+
+inline float avgDot4(int index)
+{
+    return ClampEpsilon(sumDot4(index) * .25);
+}
+inline float avgDot3(int index)
+{
+    return ClampEpsilon(sumDot3(index) * .3333);
+}
+inline float avgDot2(int index)
+{
+    return ClampEpsilon(sumDot2(index) * .5);
+}
+
+inline float dot4(int index)
+{
+    return getDot(index) * getDot(index + 1) * getDot(index + 2) * getDot(index + 3);
+}
+inline float dot3(int index)
+{
+    return getDot(index) * getDot(index + 1) * getDot(index + 2);
+}
+inline float dot2(int index)
+{
+    return getDot(index) * getDot(index + 1);
+}
+inline float4 getDot4(int index)
+{
+    return float4(sumDot2(index + 0), sumDot2(index + 1), sumDot2(index + 2), sumDot2(index + 3)) * .5;
+}
+inline float3 getDot3(int index)
+{
+    return float3(sumDot2(index + 0), sumDot2(index + 1), sumDot2(index + 2)) * .5;
+}
+inline float2 getDot2(int index)
+{
+    return float2(sumDot2(index + 0), sumDot2(index + 1)) * .5;
+}
+
+
+// Main shader entry point
+float4 QuantumElectrodynamicsEffect(float2 uv)
+{
+    float3 position = float3(uv, dep2D(depthMap, uv));
+    float3 direction = normalize(config.viewPos - position);
+    Material material = ConvertMaterialPropertiesToMaterial(CreateMaterial(MaterialIndex), 550.0);
+
+    float3 radiance = float3(0.0, 0.0, 0.0);
+    for (int i = 0; i < NUM_SAMPLES; i++)
+    {
+        float wavelength = WAVELENGTH_MIN + i * (WAVELENGTH_MAX - WAVELENGTH_MIN) / (NUM_SAMPLES - 1);
+        for (int j = 0; j < 5; j++)
+        {
+            radiance += QuantumElectrodynamics(position, direction, wavelength, material, j);
+        }
+    }
+
+    radiance /= NUM_SAMPLES * 5;
+    return float4(radiance, 1.0);
+}
+
+
+
+
+float3 ApplyChromaticAberration(float2 oosz, MaterialProperties mat, float2 uv, float2 uvOffset, float2 colorShiftOffset, Texture2D diffuseMap, Texture2D<float3> normalMap, Texture2D<float> depthMap, Texture2D<float4> gratingMap, Texture2D<float3> gratingNormal, Texture2D<float> gratingDepth, float aberrationStrength,
+float2 gradient, float depth, float2 modulation)
+{
+       
+    float3 pixel = float3(uv, depth);
+    
+    float3 normal = normal2D(normalMap, pixel.xy);
+	//GetNormal(config.oosz, normalMap, pixel.xy, normalRadius, config.modulation);
+    //GetNormal2(config.oosz, depthMap, config.uv, normalRadius, config.modulation).xyz;
+    
+    vec3 viewDir = normalize(config.viewPos - pixel);
+    vec3 center = mir2D(diffuseMap, pixel.xy).xyz;
+    
+    vec3 c = (vec3(
+        slerp(center.r, mir2D(diffuseMap, uv + colorShiftOffset).r, aberrationStrength),
+        center.g,
+        slerp(center.b, mir2D(diffuseMap, uv - colorShiftOffset).b, aberrationStrength)));
+    
+    return slerp(c, CalculateMaterialLighting(c, pixel, normal, viewDir, mat, attenuationSun(), aberrationStrength, uv, uvOffset).xyz, .5);
+   
+
+}
+
+vec4 FinalColor(float3 viewDir, float4 normal, float4 lightDirection, float4 diffuseColor, float4 baseReflectivity, float4 fresnel, float4 fresnelPower, float4 fresnelReflectance, float4 specularColor, float4 specularPower, float4 specularIntensity)
+{
+    vec4 specularTerm = float4(
+        pow(
+            ClampEpsilon(dot(reflect(-lightDirection.xyz, normal.xyz), viewDir)), specularPower.xyz), 1);
+    
+    vec4 specularContribution = ClampEpsilon(dot(viewDir, config.normal)) * Schlick2(baseReflectivity, fresnel, fresnelPower);
+    
+    
+    vec4 finalColor = (diffuseColor * (1.0 - fresnelReflectance) * (1.0 - fresnel) +
+                  specularColor * specularTerm * specularIntensity *
+                  specularContribution);
+    
+    return finalColor;
+}
+
+
+
+float3 CalculateQuantumPropagation(float3 position, float3 direction, float wavelength, float time)
+{
+    direction = normalize(direction);
+    float wavevector = 2.0 * PI / max(0.0001, wavelength);
+    float angularFrequency = SPEED_OF_LIGHT * wavevector;
+    float3 newPosition = position + direction * SPEED_OF_LIGHT * time;
+    float phase = dot(newPosition, wavevector) - angularFrequency * time;
+    float3 waveFunction = cos(phase) * dot(direction, wavevector);
+    return newPosition + waveFunction * max(0.0001, wavelength);
+}
+
+
+
+struct HolographicOutput
+{
+    float4 EmissionColor : SV_TARGET0;
+    float3 SpecularColor : SV_TARGET1;
+    float Depth : SV_TARGET2;
+};
+
+
+static const float3 RGB2SpectralWeight[9] =
+{
+    float3(0.233411, 0.455795, 0.649003),
+    float3(0.094524, 0.833158, 0.287309),
+    float3(0.041971, 0.376366, 0.916340),
+    float3(0.194966, 0.198944, 0.969189),
+    float3(0.054293, 0.029753, 0.999158),
+    float3(0.158427, 0.009062, 0.996095),
+    float3(0.181900, 0.003632, 0.995764),
+    float3(0.902572, 0.001543, 0.679755),
+    float3(0.211114, 0.001416, 0.692726)
+};
+// Function to get a basis matrix from a given vector
+void GetBasisFromVector(float3 v, out float3 vx, out float3 vy)
+{
+    float3 vz = abs(v.x) > 0.99 ? float3(0, 1, 0) : float3(1, 0, 0);
+    vz = normalize(cross(vz, v));
+    
+    vx = normalize(cross(vz, v));
+    vy = cross(v, vx);
+}
+
+float3x3 GetBasisFromVector(float3 v)
+{
+    float3 vx, vy;
+    GetBasisFromVector(v, vx, vy);
+    return float3x3(vx, vy, v);
+}
+
+// Function to generate a random ray direction in a hemisphere
+float3 RandomRayInHemisphere(float3 normal)
+{
+    float2 randVal = randomNoise2(normal.xy + normal.z);
+    float3 u = normalize(float3(randVal.x * 2 - 1, randVal.y * 2 - 1, 1));
+    u = mul(u, GetBasisFromVector(normal));
+    
+    float len = sqrt(1 - u.z * u.z);
+    return float3(u.xy * len, u.z);
+}
+
+// Function to estimate spectral radiance by accumulating nearby photons
+float3 SpectralRadianceEstimate(Texture2D gratingMap, float photonRadius, float photonScale, int photonRayCount, float3 worldPos, float3 normal)
+{
+    float3 radiance = 0;
+    for (int i = 0; i < photonRayCount; i++)
+    {
+        float3 rayDir = RandomRayInHemisphere(normal);
+        float rayLength = 0;
+        
+        // March along ray and accumulate photon hits
+        for (int j = 0; j < 100; j++)
+        {
+            float3 samplePos = worldPos + rayDir * rayLength;
+            float3 photon = mir2D(gratingMap, samplePos.xy).xyz;
+            if (any(photon))
+            {
+                float dist = distance(samplePos, worldPos);
+                if (dist < photonRadius * photonScale)
+                {
+                    radiance += photon / (dist * dist);
+                }
+            }
+            rayLength += photonRadius * photonScale * 0.5;
+        }
+    }
+    radiance /= photonRayCount;
+    
+    // Convert from RGB to spectral
+    float3 spectral = 0;
+    for (i = 0; i < 9; i++)
+    {
+        spectral += radiance * RGB2SpectralWeight[i];
+    }
+    return spectral;
+}
+float3 SpectralRadianceEstimate(Texture2D gratingMap, float photonRadius, float photonScale, float3 worldPos, float3 normal, int PhotonRayCount)
+{
+    float3 radiance = 0;
+    for (int i = 0; i < PhotonRayCount; i++)
+    {
+        float3 rayDir = normalize(RandomRayInHemisphere(normal));
+        float rayLength = 0;
+        
+        // March along ray and accumulate photon hits
+        for (int j = 0; j < 100; j++)
+        {
+            float3 samplePos = worldPos + rayDir * rayLength;
+            float3 photon = mir2D(gratingMap, samplePos.xy).xyz;
+            if (photon.r > 0 || photon.g > 0 || photon.b > 0)
+            {
+                float dist = distance(samplePos, worldPos);
+                if (dist < photonRadius * photonScale)
+                {
+                    radiance += photon / (dist * dist);
+                }
+            }
+            rayLength += photonRadius * 0.5;
+        }
+    }
+    radiance /= PhotonRayCount;
+    
+    // Convert from RGB to spectral
+    float3 spectral = 0;
+    for (i = 0; i < 9; i++)
+    {
+        spectral += radiance * RGB2SpectralWeight[i];
+    }
+    return spectral;
+}
+
+float3 getNoisePattern(float2 uv, float scale)
+{
+    float3 noise1v = noise3(uv * scale).rgb * 2 - 1;
+    float3 noise2v = noise3(uv * scale * 0.5).rgb * 2 - 1;
+    float3 noise3v = noise3(uv * scale * 0.25).rgb * 2 - 1;
+    return (noise1v + noise2v + noise3v) * 0.333 * cosTime01(timr * 0.1) * sinTime01(timr * 0.05);
+}
+
+// Function to generate a flicker pattern
+float getFlickerPattern(float2 uv, float time, float hologramFlickerSpeed, float hologramFlickerRandomness, float hologramFlickerIntensity)
+{
+    float flicker = sin(time * hologramFlickerSpeed + randomNoise2(uv * hologramFlickerRandomness).x * 6.28);
+    flicker += sin(time * hologramFlickerSpeed * 0.5 + randomNoise2(uv * hologramFlickerRandomness * 0.5).y * 6.28) * 0.5;
+    return saturate(flicker * hologramFlickerIntensity * sinTime01(timr * 0.05) * cosTime01(timr * 0.1));
+}
+
+// Function to generate a scanline pattern
+float getScanlinePattern(float2 uv, float time, float hologramScanlineWidth, float hologramScanlineSpeed, float hologramScanlineIntensity)
+{
+    float scanline = abs(frac(uv.y * hologramScanlineWidth + time * hologramScanlineSpeed) * 2.0 - 1.0);
+    scanline += abs(frac(uv.y * hologramScanlineWidth * 0.5 + time * hologramScanlineSpeed * 0.5) * 2.0 - 1.0) * 0.5;
+    return saturate(scanline * hologramScanlineIntensity * cosTime01(TotalTime * 0.1) * sinTime01(timr * 0.05));
+}
+
+// Function to generate accommodation blur
+float getAccommodationBlur(float depth, float hologramAccommodationBlur, float hologramAccommodationIntensity)
+{
+    float blurFactor = saturate(depth * hologramAccommodationBlur);
+    blurFactor += saturate(depth * hologramAccommodationBlur * 0.5) * 0.5;
+    return slerp(1.0, 0.0, blurFactor * hologramAccommodationIntensity * cosTime01(timr * 0.1) * sinTime01(timr * 0.05));
+}
+
+// Wigner Distribution Function (WDF)
+float2 wignerDistributionFunction(float2 uv, float2 direction, float width)
+{
+    float2 wdf = float2(0.0, 0.0);
+    float2 offset = uv - 0.5;
+    float radius = length(offset);
+    float angle = atan2(offset.y, offset.x);
+    float gaussian1 = exp(-radius * radius / (width * width));
+    float gaussian2 = exp(-radius * radius / (width * width));
+    wdf.x = gaussian1 * cos(angle * direction.x) + sin(angle * direction.x) * 0.1;
+    wdf.y = gaussian2 * sin(angle * direction.y) + cos(angle * direction.y) * 0.1;
+    return wdf * cosTime01(timr * 0.1);
+}
+
+// Gaussian Double-Slit Experiment
+float2 gaussianDoubleSlit(float2 uv, float2 slitPositions, float slitWidth, float2 diffractionDirection)
+{
+    float2 wdf1 = wignerDistributionFunction(uv, diffractionDirection, slitWidth);
+    float2 wdf2 = wignerDistributionFunction(uv - slitPositions, diffractionDirection, slitWidth);
+    float2 interference = float2(abs(wdf1.x * wdf2.x), abs(wdf1.y * wdf2.y));
+    
+    float quantumFluctuation = randomNoise2(uv * 0.01).x * 0.1;
+    return interference * sinTime01(TotalTime * 0.05) * (1 + quantumFluctuation);
+}
+float4 ps_albedo(
+    Texture2D<float4> diffuseMap, float2 uv,
+    Texture2D<float4> diffuseMap2, float2 uv2,
+    Texture2D<float4> diffuseMap3, float2 uv3,
+    Texture2D<float3> normalMap)
+{
+    // Calculate the physically based lighting
+    float3 normal = normal2D(normalMap, uv).xyz;
+    float ndotl = saturate(dot(normal, config.pixelToSunDir));
+    float ndoth = config.NdotH;
+    float roughness = 0.25; // Roughness value
+    float metallic = 0.9; // Metallic value
+    
+    // Interpolate diffuse colors from three texture maps
+    float3 diffuse1 = mir2D(diffuseMap, uv).xyz;
+    float3 diffuse2 = mir2D(diffuseMap2, uv2).xyz;
+    float3 diffuse3 = mir2D(diffuseMap3, uv3).xyz;
+    float3 diffuse = lerp(diffuse1, lerp(diffuse2, diffuse3, 0.05), 0.05) + (1 - metallic) * float3(0.9, 0.9, 0.8) * ndotl;
+    
+    // Calculate specular reflection
+    float3 specular = metallic * (ndotl * 0.04 + (1 - roughness) * pow(ndoth, 5));
+    
+    // Combine diffuse and specular components
+    float3 color = diffuse + specular;
+    
+    // Calculate the depth value
+    float depth = config.depth;
+
+    // Calculate the focus point and aperture
+    float focusPoint = 1 * cosTime01(timr);
+    float aperture = 2 + cosTime01(timr);
+
+    // Calculate the blur amount
+    float blurAmount = 0.0;
+    if (depth < focusPoint - aperture || depth > focusPoint + aperture)
+    {
+        blurAmount = smoothstep(0.0, 1.0, clamp(abs(depth - focusPoint) / aperture, 0, 1));
+    }
+
+    // Apply depth of field blur
+    color *= (1 - blurAmount);
+
+    // Calculate the holographic effect
+    float2 distort = sin((uv + TotalTime * timr) * 0.05) * 0.005;
+    uv += distort;
+    float4 hologram = mir2D(diffuseMap, uv);
+
+    // Recalculate the blur amount based on depth
+    if (depth < focusPoint - aperture || depth > focusPoint + aperture)
+    {
+        blurAmount = smoothstep(0.0, 1.0, clamp(abs(depth - focusPoint) / aperture, 0, 1));
+    }
+
+    // Combine the hologram and blur
+    float4 color4 = float4(color, 1) * hologram * (1 - blurAmount);
+    return slerp(float4(color, 1), color4, config.NdotV);
+}
+
+
+
+float4 PS_Holographic(
+    float2 oosz,
+    Texture2D<float4> diffuseMap, float2 uv,
+    Texture2D<float4> diffuseMap2, float2 uv2,
+    Texture2D<float> depthMap)
+{
+    // Calculate the holographic effect
+    float2 distort = sin((uv + TotalTime * timr) * 0.05) * 0.05;
+    uv += distort;
+    float4 hologram = mir2D(diffuseMap, uv);
+
+    // Calculate the depth and blur
+    float depth = dep2D(depthMap, uv);
+    float focusPoint = 10.0;
+    float aperture = 5.0;
+    float blurAmount = 0.0;
+    if (depth < focusPoint - aperture || depth > focusPoint + aperture)
+    {
+        blurAmount = smoothstep(0.0, 1.0, clamp(abs(depth - focusPoint) / aperture, 0, 1));
+    }
+
+    // Additional distortion for the second hologram
+    uv2 += (sin((uv2 + TotalTime * timr) * 0.2) + cos((uv2 + TotalTime * timr) * 0.2)) * 0.02;
+    float4 hologram2 = mir2D(diffuseMap2, uv2);
+
+    // Combine the holograms and blur
+    float4 color = slerp(hologram * (1 - blurAmount), hologram2 * blurAmount, depth * 0.5 + (1 - config.HdotV) * 0.5);
+    return color;
+}
+
+float4 PS_HolographicFresnelSchlick(Texture2D<float4> diffuseMap, float2 uv, Texture2D<float4> diffuseMap2, float2 uv2, float NdotV, float HdotV, float VdotL, float depth, float invDepth)
+{
+    // Holographic effect using wave theory
+    float2 distort = sin((uv - 0.5 + TotalTime * timr)) * 0.005 * invDepth + cos((uv - 0.5 + TotalTime * timr)) * 0.025 * depth;
+    uv += distort;
+    float4 hologram = mir2D(diffuseMap, uv);
+
+    // Fresnel-Schlick term using electromagnetic theory
+    float dotProduct = NdotV;
+    float fresnel = pow(1 - dotProduct, 5);
+
+    // Schlick approximation using quantum mechanics
+    float schlick = fresnel * (1 - hologram.a) + hologram.a;
+
+    uv2 += sin((uv2 + TotalTime * timr) * 0.01) * 0.01 + cos((uv2 + TotalTime * timr) * 0.01) * 0.01 * depth;
+    float4 hologram2 = mir2D(diffuseMap2, uv2);
+    schlick += fresnel * (1 - hologram2.a) + hologram2.a;
+
+    // Subtle glow effect using thermal radiation
+    float glow = smoothstep(0.0, 1.0, dotProduct) + depth;
+
+    // Combine the hologram and Schlick approximation using wave-particle duality
+    float4 color = glow * float4(0.0, 0.0, 0.0, 0.0) + hologram * schlick;
+
+    // Depth-based blur effect using fluid dynamics
+    float focusPoint = 0;
+    float aperture = 0.025;
+    float blurAmount = 0.0;
+    if (depth < focusPoint - aperture || depth > focusPoint + aperture)
+    {
+        blurAmount = cos(TotalTime) * 20 * HdotV * NdotV * smoothstep(0.0, 1.0, abs(depth - focusPoint) / aperture);
+    }
+    color.rgb += blurAmount * float3(0.05, 0.0, 0.05);
+
+    // Modulation effect
+    float2 depthGradient = float2(depth, invDepth);
+    float2 modulation = GetModulation(depthMap, uv);
+
+    return slerp(slerp(color, color * schlick, HdotV), glow * float4(0, 0, 0, 0), 1 - VdotL) * float4(modulation, 1.0, 1.0);
+}
+
+float4 QuantumFluctuation(float2 oosz, float2 uv, float3 viewDir, float3 lightDir, float3 normal, float3 diffuse)
+{
+	// Grating map
+    float grating = dep2D(oosz, gratingDepth4, uv);
+    float3 gratingNormal = normal2D(gratingNormal4, uv);
+    float2 distortedUV = uv + (grating * 2.0 * 3.14159) / 10000;
+
+	// Depth map
+    float depth = dep2D(oosz, depthMap, uv);
+    float3 position = float3(uv * 2.0 - 1.0, depth);
+
+	// Normal map
+    normal = normalize(normal);
+
+	// Quantum fluctuation
+    float quantum = ClampEpsilon(dot(gratingNormal, normal));
+    float2 quantumUV = uv + (viewDir.xy / viewDir.z + normal.xy / normal.z + gratingNormal.xy / gratingNormal.z) * .5 * quantum;
+    float3 quantumColor = lerp(mir2D(diffuseMap, uv).xyz, mir2D(gratingMap1, uv + .01 * refract(-config.viewDir.xy / config.viewDir.z, normal.xy / normal.z, length(uv - .5) * cosTime01(timr))).xyz, .1);
+
+	// Calculate lighting
+    float3 ambient = float3(0.1, 0.1, 0.1);
+    float3 diffuseLight = ClampEpsilon(dot(normal, lightDir)) * diffuse;
+    float3 glow = pow(ClampEpsilon(dot(reflect(-lightDir, normal), viewDir)), 10.0) * diffuse;
+
+	// Combine effects
+    float3 finalColor = (ambient + diffuseLight + glow) * diffuse;
+    finalColor += quantumColor;
+
+    return float4(saturate(finalColor), 1.0);
+}
+
+
+inline float2 zoom2D(float2 uv, float zoom)
+{
+    return (uv - .5) * zoom + .5;
+}
+
+inline float2 uvZoom(float2 uv, float scale)
+{
+    return zoom2D(uv, 1 - scale * dep2D(uv) * cosTime01(timr));
+}
+
+
+// Helper functions for time-based modulation factors
+inline float cosTimeMod(float time, float scale, float frequency)
+{
+    return cos(time * frequency) * scale;
+}
+
+inline float sinTimeMod(float time, float scale, float frequency)
+{
+    return sin(time * frequency) * scale;
+}
+
+// Function to calculate rotation-aware offset
+inline float2 CalculateRotationOffset(float2 uv, float2 center, float angle)
+{
+    float s = sin(angle);
+    float c = cos(angle);
+
+    // Translate point back to origin
+    uv -= center;
+
+    // Rotate point
+    float xnew = uv.x * c - uv.y * s;
+    float ynew = uv.x * s + uv.y * c;
+
+    // Translate point back
+    uv = float2(xnew, ynew) + center;
+
+    return uv;
+}
+
+
+psout PS(PS_INPUT input)
+{
+    // Apply uv zoom for parallax mapping
+    input.uv = uvZoom(input.uv, PerlinNoise(input.uv, dep2D(input.uv)));
+    
+    ViewZ += cosTime01(timr);
+    DepthScale += (((PassNum + 1) / NumPasses) * (cosTime01(timr * .01) * 2 - 1));
+    AnimateSpeed += ((PassNum + 1) / NumPasses) * (1 - dep2D(input.uv)) * ParallaxScale * .1 * PerlinNoise(config.uv, TotalTime * timr);
+    AnimateSpeed += ((PassNum + 1) / NumPasses) * dep2D(input.uv) * ParallaxScaleOMD *.1* 0.5;
+    psout ret;
+ 
+    // Initialize configuration based on input parameters and global settings
+    config = InitializeConfig(ooszDep(), TotalTime * timr, input.uv, ooszDiffuse(), ooszRT(), camPos0);
+    // Initialize render targets
+    if (PassNum == 0)
+    {
+        ret.rt1 = float4(0, 0, 0, 1);
+        ret.rt2 = float4(0, 0, 0, 1);
+        ret.rt3 = float4(0, 0, 0, 1);
+        ret.rt4 = float4(0, 0, 0, 1);
+        ret.rt5 = float4(0, 0, 0, 1);
+        ret.rt6 = float4(0, 0, 0, 1);
+        ret.rt7 = float4(0, 0, 0, 1);
+        ret.rt8 = float4(0, 0, 0, 1);
+    }
+    else
+    {
+        ret.rt1 = mir2D(rtMap1, config.uv0);
+        ret.rt2 = mir2D(rtMap2, config.uv0);
+        ret.rt3 = mir2D(rtMap3, config.uv0);
+        ret.rt4 = mir2D(rtMap4, config.uv0);
+        ret.rt5 = mir2D(rtMap5, config.uv0);
+        ret.rt6 = mir2D(rtMap6, config.uv0);
+        ret.rt7 = mir2D(rtMap7, config.uv0);
+        ret.rt8 = mir2D(rtMap8, config.uv0);
+    }
+
+    // Time-based modulation factors
+    float ct1 = cosTimeMod(TotalTime * timr, 1.0, 1.0);
+    float ct2 = cosTimeMod(TotalTime * timr, 1.0, 1.5);
+    float ct3 = cosTimeMod(TotalTime * timr, 1.0, 0.5);
+    float ct4 = sinTimeMod(TotalTime * timr, 1.0, 1.0);
+    float ct5 = sinTimeMod(TotalTime * timr, 1.0, 1.5);
+   
+        
+    // Initialize material properties
+    MaterialProperties mat = CreateMaterial(MaterialIndex);
+   
+    if (PassNum == 0)
+    {
+        // Dynamic range for occlusion layers
+        int numOcclusionLayers = clamp((NumPasses / (PassNum + 1)) * HeightScale, 4, 40);
+
+        // Calculate depth-based occlusion offsets
+        float depth = dep2D(depthMap, config.uv);
+        float2 depthGradient = GetGradient(config.uv);
+    
+        float rotationAngle = ct1;
+        // Rotation-aware offsets
+        float2 rotationOffset1 = CalculateRotationOffset(float2(ct1, ct2), config.uv, rotationAngle) * .1;
+        float2 rotationOffset2 = CalculateRotationOffset(float2(ct4, ct5), config.uv, -rotationAngle) * .1;
+
+        // Final occlusion offsets with depth modulation
+        float2 occlusionOffset = rotationOffset1 * (1 - ParallaxScaleOMD);
+        float2 occlusionOffset2 = rotationOffset2 * ParallaxScaleOMD;
+
+        // Apply the offsets to the scene depth
+        
+        ParallaxResult depthPR = ParallaxOcclusion(config.oosz, depthMap, config.uv, occlusionOffset, occlusionOffset2, numOcclusionLayers);
+        float2 depthOffset = depthPR.uv - config.uv;
+        
+        config.uv = depthPR.uv;
+     
+        UpdateConfig(config, config.uv, config.viewPos);
+    
+        //ret.rt1 = mir2D(diffuseMap, config.uv);
+    
+        ret.rt5 = float4(ApplyChromaticAberration(config.oosz, mat, config.uv + (PassNum + 1) * .013 * dep2D(config.uv) * PerlinNoise(config.uv, TotalTime * timr), depthOffset, depthOffset * config.NdotV, diffuseMap, normalMap, depthMap, config.NdotV),1);
+        ret.rt2 = vec4(normal2D(normalMap, config.uv) * .5 + .5, .5);
+      
+        float d = dep2D(depthMap, config.uv);
+        ret.rt4 = float4(d, d, d, 1);
+
+    }
+    else
+    {
+      
+        ret.rt1 = slerp(ret.rt5, QFresnelm(WavelengthSpectrumPS(rtMap5, normalMap, depthMap, config.uv), 1 - cosTime01(timr)), .5);
+        
+            
+        ret.rt1 = float4(rotateHue(ret.rt1.xyz, 20 * TotalTime * timr), 1);
+    
+    }
+    ret.rt1 = config.uv.x > max(0, LOOK_AT.x) ? ret.rt1 : mir2D(diffuseMap, config.uv);
+    return ret;
+}
+
+
+
+// Shader entry point for Direct3D
+technique10 MainTechnique
+{
+    pass P0
+    {
+        SetPixelShader(CompileShader(ps_5_0, PS()));
+    }
+}
