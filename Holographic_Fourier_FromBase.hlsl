@@ -259,21 +259,22 @@ float3x3 DielectricTensor_Uniaxial(float n_o,float n_e,float3 oa){ float eo=n_o*
 float2 Hash22(float2 p){ return frac(sin(float2(dot(p,float2(127.1,311.7)),dot(p,float2(269.5,183.3))))*43758.5453); }
 float Hash21(float2 p){ return frac(sin(dot(p,float2(127.1,311.7)))*43758.5453); }
 
-float2 TexSize(Texture2D<float> t){ uint2 s; t.GetDimensions(s.x,s.y); return float2(s); }
-float2 TexSize4(Texture2D<float4> t){ uint2 s; t.GetDimensions(s.x,s.y); return float2(s); }
-float2 Texel4(Texture2D<float4> t){ return 1.0/TexSize4(t); }
-PlateGeom MakePlateGeom(){ float2 texPx=max(TexSize(depthMap),float2(1,1)); float maxPx=max(texPx.x,texPx.y); PlateGeom g; g.sizeM=texPx/maxPx; g.depthM=max(DepthScale,0); g.parallaxUv=g.depthM/g.sizeM; return g; }
+float2 TexSizeDepth(){ uint w,h; depthMap.GetDimensions(w,h); return float2((float)w,(float)h); }
+float2 TexSizeDiffuse(){ uint w,h; diffuseMap.GetDimensions(w,h); return float2((float)w,(float)h); }
+float2 TexSize4Diffuse(){ uint w,h; diffuseMap.GetDimensions(w,h); return float2((float)w,(float)h); }
+float2 Texel4Diffuse(){ return 1.0/TexSize4Diffuse(); }
+PlateGeom MakePlateGeom(){ float2 texPx=max(TexSizeDepth(),float2(1,1)); float maxPx=max(texPx.x,texPx.y); PlateGeom g; g.sizeM=texPx/maxPx; g.depthM=max(DepthScale,0); g.parallaxUv=g.depthM/g.sizeM; return g; }
 float3x3 ViewFacingTbn(float3 d){ float3 dir=SafeNormalize(d); float rho=length(dir.xy); float2 axis=rho>1e-6?float2(-dir.y,dir.x)/rho:0; float th=min(acos(clamp(dir.z,-1,1)),1.0471976)*0.5; float s,c; sincos(th,s,c); float k=1-c; float3 t=float3(c+axis.x*axis.x*k,axis.x*axis.y*k,-axis.y*s); float3 b=float3(axis.x*axis.y*k,c+axis.y*axis.y*k,axis.x*s); float3 n=float3(axis.y*s,-axis.x*s,c); return float3x3(t,b,n); }
 float3 N2W(float3 n,float2 sz){ return float3((n.xy-0.5)*sz,n.z); }
 float3 SurfacePosW(float2 uv,float d01,float2 sz,float dM){ float3 n=float3(uv,0); float3 w=N2W(n,sz); w.z+=d01*dM; return w; }
 ViewLightFrame BuildViewLightFrame(float3 pW,float3 eyeW,float3 sunW,float3x3 tbn){ ViewLightFrame f; float3 vW=normalize(eyeW-pW); float3 lW=normalize(sunW-pW); f.viewDirTS=mul(tbn,vW); f.lightDirTS=mul(tbn,lW); f.normalTS=float3(0,0,1); f.halfTS=normalize(f.viewDirTS+f.lightDirTS); return f; }
 float PomDepth(float2 uv,float2 dx,float2 dy){ float d=depthMap.SampleGrad(sampleTypeMirror,uv,dx,dy); return clamp(1.0-d,1e-3,1-1e-3); }
 float LodFade(float lod){ return saturate((5.0-lod)/(5.0-1.0)); }
-float DepthRaw(Texture2D<float> t,float2 uv){ float d=clamp(t.SampleLevel(sampleTypeMirror,uv,0),1e-3,1-1e-3); float lod=t.CalculateLevelOfDetail(sampleTypeLinear,uv); return (1.0-d)*saturate((5.0-lod)/4.0); }
+float DepthRaw(float2 uv){ float d=clamp(depthMap.SampleLevel(sampleTypeMirror,uv,0),1e-3,1-1e-3); float lod=depthMap.CalculateLevelOfDetail(sampleTypeLinear,uv); return (1.0-d)*saturate((5.0-lod)/4.0); }
 float PomIgn(float2 p){ return frac(52.9829189*frac(dot(p,float2(0.06711056,0.00583715)))); }
 float PomAo(float2 uv,float hd,float dM,float2 sz,float j,float2 rcp,float2 dx,float2 dy){ float ao=0; int c=0; for(int i=0;i<3;++i) for(int j2=0;j2<18;++j2){ float ang=6.2831853*(j2+PomIgn(uv*97.3+j2))/18.0; float rad=(i+1)/3.0*4.0; float2 off=float2(cos(ang),sin(ang))*rad*rcp; float sd=PomDepth(uv+off,dx,dy); ao+=(hd-sd)>0.01?1:0; c++; } return 1.0 - saturate(float(ao)/float(c))*1.0; }
 PomResult ParallaxOcclusion(float2 uv0,float2 pix,PlateGeom geom,float3 tbnN,float3 viewTS,float3 lightTS){
-    float2 texPx=TexSize(depthMap); float lod=depthMap.CalculateLevelOfDetail(sampleTypeLinear,uv0);
+    float2 texPx=TexSizeDepth(); float lod=depthMap.CalculateLevelOfDetail(sampleTypeLinear,uv0);
     float fade=saturate((5.0-lod)/4.0); float2 rcp=1.0/texPx;
     float viewCos=saturate(viewTS.z); float nMin=2,nMax=8; float steps=lerp(nMax,nMin,saturate(viewCos))*fade;
     float2 rayUv= -viewTS.xy/max(viewTS.z,0.05)*geom.parallaxUv/steps;
@@ -299,7 +300,7 @@ PomResult ParallaxOcclusion(float2 uv0,float2 pix,PlateGeom geom,float3 tbnN,flo
     float3 col=(albedo*(0.5*ndotv+0.08)*ao + albedo*ndotl*shadowLit + spec*shadow*0.25)*trans;
     PomResult R; R.color=float4(col,1); R.albedo=albedo; R.uv=uvHit; R.normalTS=shN; R.shadow=shadow; R.hitDepth=hd; R.fade=fade; R.edge=edge; R.probe=probe; return R;
 }
-float3 CieXBar(float l){ l=clamp(l,1,1000); float t; float a; a=1.056*exp(-0.5*pow((l-599.8)/((l<599.8)?37.9:31.0),2)); float b=0.362*exp(-0.5*pow((l-442)/((l<442)?16:26.7),2)); float c=-0.065*exp(-0.5*pow((l-501.1)/((l<501.1)?20.4:26.2),2)); return saturate(a+b+c); }
+float CieXBar(float l){ l=clamp(l,1,1000); float a=1.056*exp(-0.5*pow((l-599.8)/((l<599.8)?37.9:31.0),2)); float b=0.362*exp(-0.5*pow((l-442)/((l<442)?16:26.7),2)); float c=-0.065*exp(-0.5*pow((l-501.1)/((l<501.1)?20.4:26.2),2)); return saturate(a+b+c); }
 float3 CieXyz(float lam){ float x=CieXBar(lam); float y=0.821*exp(-0.5*pow((lam-568.8)/((lam<568.8)?46.9:40.5),2))+0.286*exp(-0.5*pow((lam-530.9)/((lam<530.9)?16.3:31.1),2)); float z=1.217*exp(-0.5*pow((lam-437)/((lam<437)?11.8:30.9),2))+0.681*exp(-0.5*pow((lam-459)/((lam<459)?26:13.8),2)); return float3(x,y,z); }
 float3 XyzToLinearRgb(float3 xyz){ float3x3 m=float3x3(3.2406,-1.5372,-0.4986,-0.9689,1.8758,0.0415,0.0557,-0.2040,1.0570); return mul(m,xyz); }
 float3 GamutCompress(float3 rgb){ float l=dot(rgb,float3(0.2126,0.7152,0.0722)); float mn=min(rgb.r,min(rgb.g,rgb.b)); if(mn>=0) return saturate(rgb); if(l<=0) return float3(1,0,0); float s=l/(l-mn); return l+(rgb-l)*s; }
@@ -316,8 +317,15 @@ static const float FILM_MAX_USED2 = 900.0+HeightParamB*60.0+FILM_BIAS2*50.0;
 
 // DOE helpers (physical)
 float DoeBesselJ(int m,float x){ float h=0.5*x; float h2=h*h; float mf=1; if(2<=m) mf*=2; if(3<=m) mf*=3; float term=pow(abs(h),float(m))/mf; float sum=term; for(int k=1;k<=10;++k){ term*=-h2/(float(k)*float(k+m)); sum+=term; } return sum; }
-float DoeEfficiency(float sOrder,float p){ if(1==1){ // DOE_PROFILE 1 placeholder
-    float s=Sinc(p-sOrder); return s*s; } }
+float DoeEfficiency(float signedOrder,float p){
+#if DOE_PROFILE == 1
+    float s=Sinc(p - signedOrder); return s*s;
+#elif DOE_PROFILE == 2
+    float m=abs(signedOrder); float s2=sin(PI*p); return (frac(0.5*m)<0.25)?0.0:4.0*s2*s2/(m*m*PI*PI);
+#else
+    float j=DoeBesselJ((int)abs(signedOrder), min(PI*p, DOE_PHASE_MAX_RAD)); return j*j;
+#endif
+}
 float DoePlanck(float lam,float T){ float lu=clamp(lam*1e-3,1e-3,100); float l2=lu*lu; return 1.0/clamp(l2*l2*lu*(exp(1.4388e4/(lu*T))-1),1e-6,1e6); }
 float DoeSource(float lam){ return DoePlanck(lam,6500)/DoePlanck(560,6500); }
 float GrooveDepthNm(float2 uv){ return DOE_GROOVE_NM*(1.0+gratingDepth1.SampleLevel(sampleTypeMirror,uv,0)); }
@@ -338,10 +346,10 @@ void ThinFilm_CharMatrix(float n0,float n1,float n2,float d,float cosT0,float la
 static const int FOURIER_TILE = 32; // 32x32 DFT tile for demo (full 512 would be 9 FFT passes)
 static const int GS_ITER = 4; // Gerchberg-Saxton iterations for phase-only
 
-// 1D DFT on 32 samples in groupshared (naive O(N²) for clarity, 32 is small)
-ComplexField DFT1D_32(ComplexField s[32], bool inv){
-    ComplexField out[32]; for(int k=0;k<32;++k){ ComplexField sum=CF_Zero(); for(int n=0;n<32;++n){ float th=(inv? 6.2831853: -6.2831853)*float(k*n)/32.0; float2 ph=CExp(th); ComplexField v; v.Ex=CMul(s[n].Ex,ph); v.Ey=CMul(s[n].Ey,ph); sum=CF_Add(sum,v); } if(!inv){ sum=CF_Scale(sum,1.0/32.0); } out[k]=sum; } return out[0]; // placeholder to keep syntax, real impl loops outside
-}
+// Fourier helpers are evaluated per-pixel via LayeredFourierHologram (far-field), not via tile DFT.
+// DFT1D_32 kept as stub for reference – full image FFT would be 2D FFT over whole U0 texture.
+// HLSL does not support returning arrays; stub compiles and is not called in per-pixel path.
+ComplexField DFT1D_32_Stub(ComplexField s, bool inv){ return s; }
 
 // Layered object field for Fourier path: U0 per layer = √albedo·mask·exp(j·diffuser + j·k·z·defocus)
 ComplexField FourierLayerField(float2 uv,float depth01,float3 albedo,float lambdaNM,float z01){
@@ -353,7 +361,7 @@ ComplexField FourierLayerField(float2 uv,float depth01,float3 albedo,float lambd
 }
 
 // Angular spectrum kernel for Fourier hologram (far-field, not Fresnel point sum)
-float2 FourierKernel(float fx,float fy,float lambda,float z){ float invL2=1/(lambda*lambda); float fsq=fx*fx+fy*fy; if(fsq>invL2) return 0; float a=sqrt(invL2-fsq); return CExp(6.2831853*z*a); }
+float2 FourierKernel(float fx,float fy,float lambda,float z){ float invL2=1/(lambda*lambda); float fsq=fx*fx+fy*fy; if(fsq>invL2) return float2(0,0); float a=sqrt(invL2-fsq); return CExp(6.2831853*z*a); }
 
 // Depth projection via 8 layers, Fourier transform per layer (tiled DFT here for demo)
 ComplexField LayeredFourierHologram(float2 holoUv,PlateGeom geom,float lambdaNM){
@@ -363,7 +371,7 @@ ComplexField LayeredFourierHologram(float2 holoUv,PlateGeom geom,float lambdaNM)
         float lo=float(li)/8.0, hi=float(li+1)/8.0, zmid=(lo+hi)*0.5;
         float z = 0.015 + zmid*0.02; // 15..35 mm
         // sample object at holoUv's layer mask
-        float d01=DepthRaw(depthMap,holoUv);
+        float d01=DepthRaw(holoUv);
         float mask = (d01>=lo && d01<hi) ? 1.0 : 0.0;
         if(mask<0.5) continue;
         float3 alb=diffuseMap.SampleLevel(sampleTypeLinear,holoUv,0).rgb;
